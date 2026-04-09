@@ -88,6 +88,12 @@ Version **1.0** – developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](http
 
 ---
 
+## 🎬 Watch DockAMP in Action
+
+[![DockAMP Demo](https://online.kevintobler.ch/projectimages/DockAMP-Banner.jpg)](https://www.youtube.com/watch?v=Dn9WTGD_WnE)
+
+---
+
 ## ⚙️ Requirements
 - macOS 14.6 Sonoma or newer
 - Docker Desktop or OrbStack (OrbStack recommended for faster network speed)
