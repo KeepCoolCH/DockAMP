@@ -421,7 +421,7 @@ struct ApacheSettings: Codable {
     var proxyTimeout: Int = 60
     var requestReadTimeout: String = "header=20-40,MinRate=500 body=20,MinRate=500"
     var keepAliveEnabled: Bool = true
-    var maxKeepAliveRequests: Int = 1000
+    var maxKeepAliveRequests: Int = 100
     var keepAliveTimeout: Int = 2
     var traceEnableOff: Bool = true
     var serverSignatureOff: Bool = true
