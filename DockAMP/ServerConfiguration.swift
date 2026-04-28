@@ -412,11 +412,11 @@ struct PHPSettings: Codable {
 struct ApacheSettings: Codable {
     var mpmType: ApacheMPMType = .event
     var startServers: Int = 2
-    var serverLimit: Int = 16
+    var serverLimit: Int = 2
     var threadsPerChild: Int = 25
-    var minSpareThreads: Int = 25
-    var maxSpareThreads: Int = 75
-    var maxRequestWorkers: Int = 40
+    var minSpareThreads: Int = 10
+    var maxSpareThreads: Int = 25
+    var maxRequestWorkers: Int = 50
     var timeout: Int = 60
     var proxyTimeout: Int = 60
     var requestReadTimeout: String = "header=20-40,MinRate=500 body=20,MinRate=500"
