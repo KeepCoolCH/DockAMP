@@ -171,16 +171,6 @@ struct ServerControlsView: View {
                     .disabled(viewModel.isStarting)
                     .buttonStyle(.borderedProminent)
                 }
-                Button {
-                    Task {
-                        await commitPendingEditsAndWait()
-                        await viewModel.updateImages()
-                    }
-                } label: {
-                    Label("Update Images", systemImage: "arrow.down.circle")
-                }
-                .disabled(viewModel.isUpdating)
-
                 Button(role: .destructive) {
                     Task {
                         await commitPendingEditsAndWait()

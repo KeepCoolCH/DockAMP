@@ -21,7 +21,7 @@ struct ProxyManagerConfigView: View {
                         Text(statusLabel)
                             .font(.headline)
                     }
-                    Text("Container: \(DockerManager.proxyManagerContainerName)")
+                    Text(store.settings.mode == .internal ? "Container: \(DockerManager.proxyManagerContainerName)" : "External Proxy Manager")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -30,30 +30,27 @@ struct ProxyManagerConfigView: View {
 
                 HStack(spacing: 10) {
                     Button("Open Admin") {
-                        if let url = URL(string: "http://localhost:\(store.settings.adminPort)") {
+                        if let url = adminURL {
                             NSWorkspace.shared.open(url)
                         }
                     }
 
-                    Button("Start") {
-                        Task { await startProxyManager() }
-                    }
-                    .disabled(isBusy || status == .running || status == .starting)
+                    if store.settings.mode == .internal {
+                        Button("Start") {
+                            Task { await startProxyManager() }
+                        }
+                        .disabled(isBusy || status == .running || status == .starting)
 
-                    Button("Restart") {
-                        Task { await restartProxyManager() }
-                    }
-                    .disabled(isBusy || status != .running)
+                        Button("Restart") {
+                            Task { await restartProxyManager() }
+                        }
+                        .disabled(isBusy || status != .running)
 
-                    Button("Stop", role: .destructive) {
-                        Task { await stopProxyManager() }
+                        Button("Stop", role: .destructive) {
+                            Task { await stopProxyManager() }
+                        }
+                        .disabled(isBusy || status == .notCreated || status == .stopped)
                     }
-                    .disabled(isBusy || status == .notCreated || status == .stopped)
-
-                    Button("Update Image") {
-                        Task { await updateProxyManagerImage() }
-                    }
-                    .disabled(isBusy)
 
                     Button("Close") {
                         dismiss()
@@ -66,19 +63,19 @@ struct ProxyManagerConfigView: View {
             Divider()
 
             Form {
-                Section("Ports") {
-                    Toggle("Auto-Start with App", isOn: $store.settings.autoStartOnAppLaunch)
-
-                    LabeledContent("HTTP Port") {
-                        TextField("HTTP", value: $store.settings.httpPort, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
+                Section("Proxy Manager") {
+                    Picker("Mode", selection: $store.settings.mode) {
+                        ForEach(ProxyManagerMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
                     }
 
-                    LabeledContent("HTTPS Port") {
-                        TextField("HTTPS", value: $store.settings.httpsPort, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
+                    if store.settings.mode == .external {
+                        LabeledContent("Admin IP / Host") {
+                            TextField(defaultAdminHost, text: $store.settings.adminIp)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 240)
+                        }
                     }
 
                     LabeledContent("Admin Port") {
@@ -86,53 +83,77 @@ struct ProxyManagerConfigView: View {
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 120)
                     }
-                }
 
-                Section("Persistence") {
-                    Toggle("Use named volumes", isOn: $store.settings.useNamedVolumes)
-
-                    if store.settings.useNamedVolumes {
-                        Text("Volumes: \(DockerManager.proxyManagerDataVolumeName), \(DockerManager.proxyManagerLEVolumeName)")
+                    if store.settings.mode == .external {
+                        Text("Open Admin uses the external host and admin port. DockAMP will not start or stop the internal proxy container in this mode.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } else {
-                        LabeledContent("Data Mount") {
-                            HStack {
-                                TextField("Path", text: $store.settings.dataMountPath)
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Choose...") {
-                                    selectFolder { path in
-                                        store.settings.dataMountPath = path
-                                    }
-                                }
-                            }
-                        }
-
-                        LabeledContent("Let's Encrypt Mount") {
-                            HStack {
-                                TextField("Path", text: $store.settings.letsEncryptMountPath)
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Choose...") {
-                                    selectFolder { path in
-                                        store.settings.letsEncryptMountPath = path
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
 
-                Section("Container Resources") {
-                    LabeledContent("CPU Cores (--cpus)") {
-                        TextField("e.g. 1.0", text: $store.settings.cpus)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
+                if store.settings.mode == .internal {
+                    Section("Ports") {
+                        Toggle("Auto-Start with App", isOn: $store.settings.autoStartOnAppLaunch)
+
+                        LabeledContent("HTTP Port") {
+                            TextField("HTTP", value: $store.settings.httpPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 120)
+                        }
+
+                        LabeledContent("HTTPS Port") {
+                            TextField("HTTPS", value: $store.settings.httpsPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 120)
+                        }
                     }
 
-                    LabeledContent("RAM Limit (--memory)") {
-                        TextField("e.g. 512m or 1g", text: $store.settings.memoryLimit)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 180)
+                    Section("Persistence") {
+                        Toggle("Use named volumes", isOn: $store.settings.useNamedVolumes)
+
+                        if store.settings.useNamedVolumes {
+                            Text("Volumes: \(DockerManager.proxyManagerDataVolumeName), \(DockerManager.proxyManagerLEVolumeName)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            LabeledContent("Data Mount") {
+                                HStack {
+                                    TextField("Path", text: $store.settings.dataMountPath)
+                                        .textFieldStyle(.roundedBorder)
+                                    Button("Choose...") {
+                                        selectFolder { path in
+                                            store.settings.dataMountPath = path
+                                        }
+                                    }
+                                }
+                            }
+
+                            LabeledContent("Let's Encrypt Mount") {
+                                HStack {
+                                    TextField("Path", text: $store.settings.letsEncryptMountPath)
+                                        .textFieldStyle(.roundedBorder)
+                                    Button("Choose...") {
+                                        selectFolder { path in
+                                            store.settings.letsEncryptMountPath = path
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Section("Container Resources") {
+                        LabeledContent("CPU Cores (--cpus)") {
+                            TextField("e.g. 1.0", text: $store.settings.cpus)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 120)
+                        }
+
+                        LabeledContent("RAM Limit (--memory)") {
+                            TextField("e.g. 512m or 1g", text: $store.settings.memoryLimit)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+                        }
                     }
                 }
 
@@ -142,7 +163,7 @@ struct ProxyManagerConfigView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
-                    Text("Note: Port or mount changes require restarting Proxy Manager.")
+                    Text(store.settings.mode == .internal ? "Note: Port or mount changes require restarting Proxy Manager." : "External mode only saves the admin connection.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -176,6 +197,10 @@ struct ProxyManagerConfigView: View {
     }
 
     private var statusLabel: String {
+        if store.settings.mode == .external {
+            return "External Proxy Manager"
+        }
+
         switch status {
         case .running: return "Proxy Manager running"
         case .starting: return "Proxy Manager starting"
@@ -187,7 +212,49 @@ struct ProxyManagerConfigView: View {
     }
 
     private func refreshStatus() async {
+        guard store.settings.mode == .internal else {
+            status = .notCreated
+            return
+        }
         status = await dockerManager.getProxyManagerStatus()
+    }
+
+    private var defaultAdminHost: String {
+        "localhost"
+    }
+
+    private var adminURL: URL? {
+        if store.settings.mode == .internal {
+            return URL(string: "http://localhost:\(store.settings.adminPort)")
+        }
+        return externalAdminURL(from: store.settings.adminIp, fallbackPort: store.settings.adminPort)
+    }
+
+    private func externalAdminURL(from value: String, fallbackPort: Int) -> URL? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return URL(string: "http://\(defaultAdminHost):\(fallbackPort)")
+        }
+
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
+            guard let url = URL(string: trimmed), let host = url.host else {
+                return nil
+            }
+            if url.port != nil || url.path != "" {
+                return url
+            }
+            return URL(string: "\(url.scheme ?? "http")://\(host):\(fallbackPort)")
+        }
+
+        let host = trimmed.split(separator: "/", maxSplits: 1).first.map(String.init) ?? trimmed
+        let colonCount = host.filter { $0 == ":" }.count
+        if host.hasPrefix("[") || colonCount == 0 {
+            return URL(string: "http://\(host):\(fallbackPort)")
+        }
+        if colonCount == 1 {
+            return URL(string: "http://\(host)")
+        }
+        return URL(string: "http://[\(host)]:\(fallbackPort)")
     }
 
     private func startProxyManager() async {
@@ -224,19 +291,6 @@ struct ProxyManagerConfigView: View {
         do {
             _ = try? await dockerManager.stopProxyManager()
             try await dockerManager.startProxyManager(settings: store.settings)
-            await refreshStatus()
-        } catch {
-            errorMessage = error.localizedDescription
-            showError = true
-        }
-    }
-
-    private func updateProxyManagerImage() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            try await dockerManager.updateProxyManagerImage()
             await refreshStatus()
         } catch {
             errorMessage = error.localizedDescription

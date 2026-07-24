@@ -9,6 +9,11 @@ struct ContentView: View {
     @State private var selectedConfigId: UUID?
     @State private var showingNewServerSheet = false
     @State private var showingProxyManagerSheet = false
+    @State private var showingLiveVisitorsSheet = false
+    @State private var showingContainerCenterSheet = false
+    @State private var showingComposeYAMLCenterSheet = false
+    @State private var showingSystemMaintenanceSheet = false
+    @State private var showingImageUpdateCenterSheet = false
     @State private var isBulkActionRunning = false
     @State private var bulkActionStatusText = ""
     @State private var bulkActionErrorMessage: String?
@@ -91,25 +96,66 @@ struct ContentView: View {
 
                 ToolbarItem(placement: .primaryAction) {
                     Button {
+                        showingNewServerSheet = true
+                    } label: {
+                        Label("New Server", systemImage: "plus")
+                    }
+                }
+
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        showingSystemMaintenanceSheet = true
+                    } label: {
+                        Label("Maintenance", systemImage: "wrench.and.screwdriver")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("System Maintenance")
+                }
+
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        showingImageUpdateCenterSheet = true
+                    } label: {
+                        Label("Image Update Center", systemImage: "arrow.down.circle")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Image Update Center")
+                }
+
+                ToolbarItem(placement: .navigation) {
+                    Button {
                         showingProxyManagerSheet = true
                     } label: {
-                        VStack(spacing: 1) {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text("Proxy Manager")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+                        Label("Proxy Manager", systemImage: "arrow.triangle.branch")
                     }
                     .help("Proxy Manager")
                 }
 
                 ToolbarItem(placement: .navigation) {
                     Button {
-                        showingNewServerSheet = true
+                        showingLiveVisitorsSheet = true
                     } label: {
-                        Label("New Server", systemImage: "plus")
+                        Label("Live Visitors", systemImage: "eye")
                     }
+                    .help("Live visitors")
+                }
+
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        showingContainerCenterSheet = true
+                    } label: {
+                        Label("Container Center", systemImage: "shippingbox")
+                    }
+                    .help("Container Center")
+                }
+
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        showingComposeYAMLCenterSheet = true
+                    } label: {
+                        Label("Compose YAMLs", systemImage: "doc.text")
+                    }
+                    .help("Compose YAMLs")
                 }
             }
             .frame(minWidth: 250)
@@ -128,6 +174,21 @@ struct ContentView: View {
         .sheet(isPresented: $showingProxyManagerSheet) {
             ProxyManagerConfigView()
                 .frame(minWidth: 760, minHeight: 560)
+        }
+        .sheet(isPresented: $showingLiveVisitorsSheet) {
+            LiveVisitorsView()
+        }
+        .sheet(isPresented: $showingContainerCenterSheet) {
+            ContainerCenterView()
+        }
+        .sheet(isPresented: $showingComposeYAMLCenterSheet) {
+            ComposeYAMLCenterView()
+        }
+        .sheet(isPresented: $showingSystemMaintenanceSheet) {
+            SystemMaintenanceView()
+        }
+        .sheet(isPresented: $showingImageUpdateCenterSheet) {
+            ImageUpdateCenterView()
         }
         .alert("Action failed", isPresented: $showBulkActionError) {
             Button("OK", role: .cancel) {}
@@ -190,7 +251,7 @@ struct ContentView: View {
     }
 
     private func nextAvailableWebPort(startingAt startPort: Int) -> Int {
-        let minimumPort = max(1, startPort)
+        let minimumPort = max(8081, startPort)
         let usedPorts = Set(configStore.configurations.map { $0.webServerPort })
 
         var candidate = minimumPort
@@ -294,6 +355,7 @@ struct ContentView: View {
 
     private func autoStartProxyManagerIfConfigured() async {
         guard dockerManager.isDockerInstalled else { return }
+        guard proxyManagerStore.settings.mode == .internal else { return }
         guard proxyManagerStore.settings.autoStartOnAppLaunch else { return }
 
         let status = await dockerManager.getProxyManagerStatus()
@@ -368,7 +430,7 @@ struct ServerListItemView: View {
                 Text(configuration.name)
                     .font(.headline)
                 
-                Text("\(configuration.webServerType.rawValue) • PHP \(configuration.phpVersion)")
+                Text(":\(String(configuration.webServerPort)) • \(configuration.webServerType.rawValue) • PHP \(configuration.phpVersion)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

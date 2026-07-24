@@ -81,9 +81,11 @@ final class DockAMPAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UserDefaults.standard.set(false, forKey: "NSAutomaticQuoteSubstitutionEnabled")
 
-        NSApp.setActivationPolicy(.accessory)
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        BackupManager.shared.startAutomaticBackups()
         installWindowObservers()
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.updateActivationPolicyForWindowState()
         }
     }

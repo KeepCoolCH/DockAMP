@@ -136,7 +136,7 @@ struct ServerConfiguration: Codable, Identifiable {
         self.autoStartOnAppLaunch = true
         
         self.webServerType = .nginx
-        self.webServerPort = 8080
+        self.webServerPort = 8081
         self.webServerDocumentRoot = NSHomeDirectory() + "/Sites"
         self.additionalContainerMounts = ""
         self.webServerCPUs = ""
@@ -194,7 +194,7 @@ struct ServerConfiguration: Codable, Identifiable {
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         autoStartOnAppLaunch = try container.decodeIfPresent(Bool.self, forKey: .autoStartOnAppLaunch) ?? false
         webServerType = try container.decodeIfPresent(WebServerType.self, forKey: .webServerType) ?? .nginx
-        webServerPort = try container.decodeIfPresent(Int.self, forKey: .webServerPort) ?? 8080
+        webServerPort = try container.decodeIfPresent(Int.self, forKey: .webServerPort) ?? 8081
         webServerDocumentRoot = try container.decodeIfPresent(String.self, forKey: .webServerDocumentRoot) ?? (NSHomeDirectory() + "/Sites")
         additionalContainerMounts = try container.decodeIfPresent(String.self, forKey: .additionalContainerMounts) ?? ""
         webServerCPUs = try container.decodeIfPresent(String.self, forKey: .webServerCPUs) ?? ""
@@ -683,11 +683,29 @@ struct DatabaseSettings: Codable {
     }
 }
 
+enum ProxyManagerMode: String, CaseIterable, Codable, Identifiable {
+    case `internal`
+    case external
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .internal:
+            return "Use internal proxy container"
+        case .external:
+            return "Use external proxy"
+        }
+    }
+}
+
 struct ProxyManagerSettings: Codable {
+    var mode: ProxyManagerMode = .internal
     var isEnabled: Bool = false
     var autoStartOnAppLaunch: Bool = true
     var httpPort: Int = 80
     var httpsPort: Int = 443
+    var adminIp: String = ""
     var adminPort: Int = 81
     var useNamedVolumes: Bool = true
     var dataMountPath: String = NSHomeDirectory() + "/Docker/DockAMP/nginx-proxy-manager/data"
@@ -698,16 +716,18 @@ struct ProxyManagerSettings: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case isEnabled, autoStartOnAppLaunch, httpPort, httpsPort, adminPort, useNamedVolumes, dataMountPath, letsEncryptMountPath, cpus, memoryLimit
+        case mode, isEnabled, autoStartOnAppLaunch, httpPort, httpsPort, adminIp, adminPort, useNamedVolumes, dataMountPath, letsEncryptMountPath, cpus, memoryLimit
     }
 
     init(from decoder: Decoder) throws {
         self.init()
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decodeIfPresent(ProxyManagerMode.self, forKey: .mode) ?? mode
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? isEnabled
         autoStartOnAppLaunch = try container.decodeIfPresent(Bool.self, forKey: .autoStartOnAppLaunch) ?? autoStartOnAppLaunch
         httpPort = try container.decodeIfPresent(Int.self, forKey: .httpPort) ?? httpPort
         httpsPort = try container.decodeIfPresent(Int.self, forKey: .httpsPort) ?? httpsPort
+        adminIp = try container.decodeIfPresent(String.self, forKey: .adminIp) ?? adminIp
         adminPort = try container.decodeIfPresent(Int.self, forKey: .adminPort) ?? adminPort
         useNamedVolumes = try container.decodeIfPresent(Bool.self, forKey: .useNamedVolumes) ?? useNamedVolumes
         dataMountPath = try container.decodeIfPresent(String.self, forKey: .dataMountPath) ?? dataMountPath
@@ -732,4 +752,122 @@ struct ContainerInfo {
     let uptime: String?
     let image: String
     let ports: [String]
+}
+
+struct ContainerCenterPort: Identifiable, Hashable {
+    var id: String { "\(hostPort):\(containerPort)/\(protocolName)" }
+    let hostPort: String
+    let containerPort: String
+    let protocolName: String
+
+    var label: String {
+        "\(hostPort):\(containerPort)/\(protocolName)"
+    }
+}
+
+struct ContainerCenterItem: Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let image: String
+    let state: String
+    let statusText: String
+    let ports: [ContainerCenterPort]
+    let isManaged: Bool
+    let role: String?
+
+    var isRunning: Bool {
+        state == "running"
+    }
+}
+
+struct ContainerCenterSnapshot {
+    let managed: [ContainerCenterItem]
+    let other: [ContainerCenterItem]
+}
+
+struct ComposeYAMLFile: Identifiable, Hashable {
+    var id: String { name }
+    let name: String
+    let size: Int64
+    let modified: Date
+}
+
+enum ImageUpdateStatus: String {
+    case installed
+    case missing
+    case unverified
+
+    var displayName: String {
+        switch self {
+        case .installed:
+            return "Installed"
+        case .missing:
+            return "Missing"
+        case .unverified:
+            return "Not checked"
+        }
+    }
+}
+
+struct ManagedImageInfo: Identifiable, Hashable {
+    let id: String
+    let label: String
+    let reference: String
+    let usedBy: [String]
+    let status: ImageUpdateStatus
+    let localImageID: String?
+}
+
+struct DockerImageCleanupItem: Identifiable, Hashable {
+    let id: String
+    let repository: String
+    let tag: String
+    let imageID: String
+    let size: String
+    let createdSince: String
+
+    var displayName: String {
+        let name = "\(repository):\(tag)"
+        return name == "<none>:<none>" ? shortImageID : name
+    }
+
+    var shortImageID: String {
+        let normalized = imageID.replacingOccurrences(of: "sha256:", with: "")
+        return String(normalized.prefix(12))
+    }
+}
+
+struct DockerVolumeCleanupItem: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let driver: String
+    let mountpoint: String
+}
+
+struct ContainerDirectoryListing: Hashable {
+    let path: String
+    let parent: String?
+    let directories: [String]
+}
+
+struct LiveVisitorEntry: Identifiable, Hashable {
+    var id: String { "\(ip)|\(userAgent)" }
+    let ip: String
+    let userAgent: String
+    let method: String
+    let path: String
+    let status: String
+    let lastSeenSecondsAgo: Int
+    let requests: Int
+}
+
+struct LiveVisitorServerActivity: Identifiable, Hashable {
+    let id: UUID
+    let serverName: String
+    let webPort: Int
+    let containerName: String
+    let status: ContainerStatus
+    let rxRate: String
+    let txRate: String
+    let activeVisitors: [LiveVisitorEntry]
 }

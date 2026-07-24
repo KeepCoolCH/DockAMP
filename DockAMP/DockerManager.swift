@@ -17,6 +17,8 @@ class DockerManager: ObservableObject {
     @Published var isDockerInstalled = false
     @Published var dockerVersion: String?
     @Published var isGlobalBulkActionRunning = false
+
+    private var netStatsCache: [String: (date: Date, rxBytes: Double, txBytes: Double)] = [:]
     
     private init() {
         checkDockerInstallation()
@@ -43,6 +45,795 @@ class DockerManager: ObservableObject {
             dockerVersion = nil
             return false
         }
+    }
+
+    // MARK: - Container Center
+
+    func containerCenterSnapshot() async throws -> ContainerCenterSnapshot {
+        let output = try await executeCommand("docker", arguments: [
+            "ps", "-a",
+            "--format", "{{json .}}"
+        ])
+
+        let rows = output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> DockerPSRow? in
+                guard let data = String(line).data(using: .utf8) else { return nil }
+                return try? JSONDecoder().decode(DockerPSRow.self, from: data)
+            }
+
+        let roleMap = containerCenterManagedRoles()
+        let items: [ContainerCenterItem] = rows.map { row in
+            let name = row.names.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ContainerCenterItem(
+                name: name,
+                image: row.image,
+                state: row.state,
+                statusText: row.status,
+                ports: parseContainerCenterPorts(row.ports),
+                isManaged: roleMap[name] != nil,
+                role: roleMap[name]
+            )
+        }
+        .sorted { lhs, rhs in
+            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+
+        return ContainerCenterSnapshot(
+            managed: items.filter { $0.isManaged },
+            other: items.filter { !$0.isManaged }
+        )
+    }
+
+    func runContainerCenterAction(containerName: String, action: String) async throws {
+        let name = containerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidContainerName(name) else {
+            throw DockerError.commandFailed("Invalid container name.")
+        }
+
+        switch action {
+        case "start":
+            _ = try await executeCommand("docker", arguments: ["start", name])
+        case "stop":
+            _ = try await executeCommand("docker", arguments: ["stop", "-t", "5", name])
+        case "restart":
+            _ = try await executeCommand("docker", arguments: ["restart", "-t", "5", name])
+        case "delete":
+            _ = try await executeCommand("docker", arguments: ["rm", "-f", name])
+        default:
+            throw DockerError.commandFailed("Unknown container action.")
+        }
+    }
+
+    func containerCenterLogs(containerName: String, tail: Int = 200) async throws -> String {
+        let name = containerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidContainerName(name) else {
+            throw DockerError.commandFailed("Invalid container name.")
+        }
+        return try await executeCommand("docker", arguments: [
+            "logs", "--tail", "\(max(1, min(tail, 1000)))", name
+        ])
+    }
+
+    func listComposeYAMLFiles() throws -> [ComposeYAMLFile] {
+        let directory = try composeYAMLDirectory()
+        let urls = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        return try urls
+            .filter { ["yml", "yaml"].contains($0.pathExtension.lowercased()) }
+            .map { url in
+                let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                return ComposeYAMLFile(
+                    name: url.lastPathComponent,
+                    size: Int64(values.fileSize ?? 0),
+                    modified: values.contentModificationDate ?? Date.distantPast
+                )
+            }
+            .sorted {
+                $0.modified > $1.modified
+            }
+    }
+
+    func readComposeYAMLFile(named name: String) throws -> String {
+        let url = try composeYAMLFileURL(named: name, mustExist: true)
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func saveComposeYAMLFile(name: String, content: String) throws -> ComposeYAMLFile {
+        let finalName = sanitizedComposeYAMLName(name)
+        guard !finalName.isEmpty else {
+            throw DockerError.commandFailed("Compose file name is empty.")
+        }
+
+        let formatted = normalizedComposeYAMLContent(content)
+        guard !formatted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DockerError.commandFailed("Compose content is empty.")
+        }
+
+        let url = try nextAvailableComposeYAMLURL(baseName: finalName)
+        try formatted.write(to: url, atomically: true, encoding: .utf8)
+        return try composeYAMLFileInfo(url)
+    }
+
+    func saveDockerRunAsComposeYAML(name: String, command: String) throws -> ComposeYAMLFile {
+        let content = try dockerRunCommandToComposeYAML(command)
+        return try saveComposeYAMLFile(name: name, content: content)
+    }
+
+    func updateComposeYAMLFile(named name: String, content: String) throws -> ComposeYAMLFile {
+        let url = try composeYAMLFileURL(named: name, mustExist: true)
+        let formatted = normalizedComposeYAMLContent(content)
+        guard !formatted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DockerError.commandFailed("Compose content is empty.")
+        }
+        try formatted.write(to: url, atomically: true, encoding: .utf8)
+        return try composeYAMLFileInfo(url)
+    }
+
+    func copyComposeYAMLFile(named name: String) throws -> ComposeYAMLFile {
+        let source = try composeYAMLFileURL(named: name, mustExist: true)
+        let target = try nextAvailableComposeYAMLURL(baseName: source.deletingPathExtension().lastPathComponent + "-copy.yml")
+        try FileManager.default.copyItem(at: source, to: target)
+        return try composeYAMLFileInfo(target)
+    }
+
+    func renameComposeYAMLFile(named name: String, to newName: String) throws -> ComposeYAMLFile {
+        let source = try composeYAMLFileURL(named: name, mustExist: true)
+        let sanitized = sanitizedComposeYAMLName(newName)
+        guard !sanitized.isEmpty else {
+            throw DockerError.commandFailed("New Compose file name is empty.")
+        }
+        let target = try composeYAMLFileURL(named: sanitized, mustExist: false)
+        guard source == target || !FileManager.default.fileExists(atPath: target.path) else {
+            throw DockerError.commandFailed("A Compose file with this name already exists.")
+        }
+        try FileManager.default.moveItem(at: source, to: target)
+        return try composeYAMLFileInfo(target)
+    }
+
+    func deleteComposeYAMLFile(named name: String) throws {
+        let url = try composeYAMLFileURL(named: name, mustExist: true)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    func runComposeYAMLFile(named name: String) async throws -> String {
+        let url = try composeYAMLFileURL(named: name, mustExist: true)
+        if let simpleRun = try await simpleComposeDockerRunArguments(for: url) {
+            return try await executeCommand("docker", arguments: ["run"] + simpleRun)
+        }
+
+        let projectName = "dockamp_cc_\(composeProjectSlug(url.deletingPathExtension().lastPathComponent))"
+        return try await executeCommand("docker", arguments: [
+            "compose",
+            "-p", projectName,
+            "-f", url.path,
+            "up", "-d"
+        ])
+    }
+
+    private func containerCenterManagedRoles() -> [String: String] {
+        var roles: [String: String] = [:]
+
+        for config in ConfigurationStore.shared.configurations {
+            roles[config.webContainerName] = "\(config.name) · Web"
+            roles[config.phpContainerName] = "\(config.name) · PHP"
+            switch config.databaseAttachmentMode {
+            case .none:
+                break
+            case .global:
+                roles[Self.sharedDatabaseContainerName] = "Shared Database"
+            case .dedicated:
+                roles[config.dbContainerName] = "\(config.name) · Database"
+            }
+        }
+
+        roles[Self.phpMyAdminContainerName] = "phpMyAdmin"
+        if ProxyManagerStore.shared.settings.mode == .internal {
+            roles[Self.proxyManagerContainerName] = "Proxy Manager"
+        }
+
+        return roles
+    }
+
+    private func parseContainerCenterPorts(_ rawPorts: String) -> [ContainerCenterPort] {
+        let pattern = #"(?:(?:0\.0\.0\.0|\[::\]|::):)?(\d+)->(\d+)/(tcp|udp)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let text = rawPorts as NSString
+        let matches = regex.matches(in: rawPorts, range: NSRange(location: 0, length: text.length))
+
+        var seen = Set<ContainerCenterPort>()
+        for match in matches where match.numberOfRanges == 4 {
+            let port = ContainerCenterPort(
+                hostPort: text.substring(with: match.range(at: 1)),
+                containerPort: text.substring(with: match.range(at: 2)),
+                protocolName: text.substring(with: match.range(at: 3))
+            )
+            seen.insert(port)
+        }
+
+        return seen.sorted { lhs, rhs in
+            (Int(lhs.hostPort) ?? 0, lhs.containerPort) < (Int(rhs.hostPort) ?? 0, rhs.containerPort)
+        }
+    }
+
+    private func isValidContainerName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        return name.range(of: #"^[A-Za-z0-9][A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil
+    }
+
+    private func composeYAMLDirectory() throws -> URL {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let directory = documentsDirectory
+            .appendingPathComponent("DockAMP", isDirectory: true)
+            .appendingPathComponent("compose-container-center", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func composeYAMLFileURL(named name: String, mustExist: Bool) throws -> URL {
+        let sanitized = sanitizedComposeYAMLName(name)
+        guard sanitized.range(of: #"^[A-Za-z0-9_.-]+\.ya?ml$"#, options: .regularExpression) != nil else {
+            throw DockerError.commandFailed("Invalid Compose file name.")
+        }
+        let url = try composeYAMLDirectory().appendingPathComponent(sanitized)
+        if mustExist && !FileManager.default.fileExists(atPath: url.path) {
+            throw DockerError.commandFailed("Compose file not found.")
+        }
+        return url
+    }
+
+    private func sanitizedComposeYAMLName(_ name: String) -> String {
+        let base = URL(fileURLWithPath: name).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = base
+            .replacingOccurrences(of: #"[^A-Za-z0-9_.-]"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        guard !cleaned.isEmpty else { return "" }
+        if cleaned.range(of: #"\.ya?ml$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return cleaned
+        }
+        return cleaned + ".yml"
+    }
+
+    private func nextAvailableComposeYAMLURL(baseName: String) throws -> URL {
+        let sanitized = sanitizedComposeYAMLName(baseName)
+        let directory = try composeYAMLDirectory()
+        let baseURL = directory.appendingPathComponent(sanitized)
+        guard FileManager.default.fileExists(atPath: baseURL.path) else {
+            return baseURL
+        }
+
+        let stem = baseURL.deletingPathExtension().lastPathComponent
+        let ext = baseURL.pathExtension
+        for index in 1...999 {
+            let candidate = directory.appendingPathComponent("\(stem)-\(index).\(ext)")
+            if !FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        throw DockerError.commandFailed("Unable to find a free Compose file name.")
+    }
+
+    private func composeYAMLFileInfo(_ url: URL) throws -> ComposeYAMLFile {
+        let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        return ComposeYAMLFile(
+            name: url.lastPathComponent,
+            size: Int64(values.fileSize ?? 0),
+            modified: values.contentModificationDate ?? Date()
+        )
+    }
+
+    private func normalizedComposeYAMLContent(_ content: String) -> String {
+        content.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
+    }
+
+    private func dockerRunCommandToComposeYAML(_ command: String) throws -> String {
+        var tokens = try shellTokens(command)
+        if tokens.first == "docker" {
+            tokens.removeFirst()
+        }
+        if tokens.first == "container" {
+            tokens.removeFirst()
+        }
+        guard tokens.first == "run" else {
+            throw DockerError.commandFailed("Please enter a docker run command.")
+        }
+        tokens.removeFirst()
+
+        var service = DockerRunComposeService()
+        let boolFlags: Set<String> = ["-d", "--detach", "--rm", "--tty", "-t", "--interactive", "-i"]
+        var index = 0
+
+        func optionParts(_ token: String) -> (key: String, value: String?) {
+            if let range = token.range(of: "=") {
+                return (String(token[..<range.lowerBound]), String(token[range.upperBound...]))
+            }
+            return (token, nil)
+        }
+
+        func nextValue(_ key: String, _ inline: String?) throws -> String {
+            if let inline { return inline }
+            index += 1
+            guard index < tokens.count else {
+                throw DockerError.commandFailed("Missing value for \(key).")
+            }
+            return tokens[index]
+        }
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "--" {
+                index += 1
+                break
+            }
+            guard token.hasPrefix("-") else {
+                break
+            }
+            let parts = optionParts(token)
+            switch parts.key {
+            case "--name":
+                service.name = try nextValue(parts.key, parts.value)
+            case "-p", "--publish":
+                service.ports.append(try nextValue(parts.key, parts.value))
+            case "-v", "--volume":
+                service.volumes.append(normalizeDockerRunVolumeSpec(try nextValue(parts.key, parts.value)))
+            case "--mount":
+                service.volumes.append(dockerRunMountToCompose(try nextValue(parts.key, parts.value)))
+            case "-e", "--env":
+                service.environment.append(try nextValue(parts.key, parts.value))
+            case "--env-file":
+                service.envFile.append(expandHomePath(try nextValue(parts.key, parts.value)))
+            case "--dns":
+                service.dns.append(try nextValue(parts.key, parts.value))
+            case "--restart":
+                service.restart = try nextValue(parts.key, parts.value)
+            case "--network", "--net":
+                let network = try nextValue(parts.key, parts.value)
+                if ["bridge", "host", "none"].contains(network) || network.hasPrefix("container:") {
+                    service.networkMode = network
+                } else {
+                    service.networks.append(network)
+                }
+            case "--add-host":
+                service.extraHosts.append(try nextValue(parts.key, parts.value))
+            case "--hostname", "-h":
+                service.hostname = try nextValue(parts.key, parts.value)
+            case "--label", "-l":
+                service.labels.append(try nextValue(parts.key, parts.value))
+            case "--user", "-u":
+                service.user = try nextValue(parts.key, parts.value)
+            case "--workdir", "-w":
+                service.workingDir = try nextValue(parts.key, parts.value)
+            case "--entrypoint":
+                service.entrypoint = try nextValue(parts.key, parts.value)
+            case "--health-cmd":
+                service.healthcheck["test"] = ["CMD-SHELL", try nextValue(parts.key, parts.value)]
+            case "--health-interval":
+                service.healthcheck["interval"] = try nextValue(parts.key, parts.value)
+            case "--health-timeout":
+                service.healthcheck["timeout"] = try nextValue(parts.key, parts.value)
+            case "--health-retries":
+                service.healthcheck["retries"] = try nextValue(parts.key, parts.value)
+            case "--health-start-period":
+                service.healthcheck["start_period"] = try nextValue(parts.key, parts.value)
+            case "--no-healthcheck":
+                service.healthcheck["disable"] = true
+            case "--cpus":
+                service.cpus = try nextValue(parts.key, parts.value)
+            case "--memory", "-m":
+                service.memLimit = try nextValue(parts.key, parts.value)
+            case "--privileged":
+                service.privileged = true
+            case "--read-only":
+                service.readOnly = true
+            case "--tmpfs":
+                service.tmpfs.append(try nextValue(parts.key, parts.value))
+            case "--shm-size":
+                service.shmSize = try nextValue(parts.key, parts.value)
+            case "--init":
+                service.initEnabled = true
+            case "--platform":
+                service.platform = try nextValue(parts.key, parts.value)
+            default:
+                if !boolFlags.contains(parts.key), parts.value == nil, index + 1 < tokens.count, !tokens[index + 1].hasPrefix("-") {
+                    index += 1
+                }
+            }
+            index += 1
+        }
+
+        guard index < tokens.count else {
+            throw DockerError.commandFailed("No image found in docker run command.")
+        }
+
+        service.image = tokens[index]
+        service.command = Array(tokens.dropFirst(index + 1))
+        return composeYAML(from: service)
+    }
+
+    private func composeYAML(from service: DockerRunComposeService) -> String {
+        let serviceName = composeProjectSlug(
+            service.name.isEmpty
+                ? service.image.split(separator: "/").last?.split(separator: ":").first.map(String.init) ?? "container"
+                : service.name
+        )
+        var lines = [
+            "services:",
+            "  \(composeScalar(serviceName)):",
+            "    image: \(composeScalar(service.image))"
+        ]
+        if !service.name.isEmpty { lines.append("    container_name: \(composeScalar(service.name))") }
+        if !service.restart.isEmpty { lines.append("    restart: \(composeScalar(service.restart))") }
+
+        let scalarPairs = [
+            ("hostname", service.hostname),
+            ("user", service.user),
+            ("working_dir", service.workingDir),
+            ("entrypoint", service.entrypoint),
+            ("cpus", service.cpus),
+            ("mem_limit", service.memLimit),
+            ("shm_size", service.shmSize),
+            ("platform", service.platform)
+        ]
+        for (key, value) in scalarPairs where !value.isEmpty {
+            lines.append("    \(key): \(composeScalar(value))")
+        }
+
+        appendYAMLList("ports", service.ports, to: &lines)
+        appendYAMLList("volumes", service.volumes, to: &lines)
+        appendYAMLList("environment", service.environment, to: &lines)
+        appendYAMLList("env_file", service.envFile, to: &lines)
+        appendYAMLList("dns", service.dns, to: &lines)
+        appendYAMLList("extra_hosts", service.extraHosts, to: &lines)
+        appendYAMLList("labels", service.labels, to: &lines)
+        appendYAMLList("tmpfs", service.tmpfs, to: &lines)
+
+        if !service.networkMode.isEmpty {
+            lines.append("    network_mode: \(composeScalar(service.networkMode))")
+        }
+        appendYAMLList("networks", service.networks, to: &lines)
+
+        if service.privileged { lines.append("    privileged: true") }
+        if service.readOnly { lines.append("    read_only: true") }
+        if service.initEnabled { lines.append("    init: true") }
+        if !service.healthcheck.isEmpty {
+            lines.append("    healthcheck:")
+            appendYAMLDictionary(service.healthcheck, indent: 6, to: &lines)
+        }
+        if !service.command.isEmpty {
+            lines.append("    command: \(composeScalar(service.command.joined(separator: " ")))")
+        }
+        if !service.networks.isEmpty {
+            lines.append("networks:")
+            for network in service.networks {
+                lines.append("  \(composeScalar(network)):")
+                lines.append("    external: true")
+            }
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func appendYAMLList(_ key: String, _ values: [String], to lines: inout [String]) {
+        guard !values.isEmpty else { return }
+        lines.append("    \(key):")
+        for value in values {
+            lines.append("      - \(composeScalar(value))")
+        }
+    }
+
+    private func appendYAMLDictionary(_ dict: [String: Any], indent: Int, to lines: inout [String]) {
+        let space = String(repeating: " ", count: indent)
+        for key in dict.keys.sorted() {
+            let value = dict[key]
+            if let array = value as? [String] {
+                lines.append("\(space)\(key):")
+                for item in array {
+                    lines.append("\(space)  - \(composeScalar(item))")
+                }
+            } else if let bool = value as? Bool {
+                lines.append("\(space)\(key): \(bool ? "true" : "false")")
+            } else if let text = value {
+                lines.append("\(space)\(key): \(composeScalar("\(text)"))")
+            }
+        }
+    }
+
+    private func composeScalar(_ value: String) -> String {
+        guard !value.isEmpty else { return "\"\"" }
+        if value.range(of: #"^[A-Za-z0-9_./:@-]+$"#, options: .regularExpression) != nil {
+            return value
+        }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    private func shellTokens(_ command: String) throws -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var isEscaped = false
+
+        for character in command.replacingOccurrences(of: "\\\n", with: " ") {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                continue
+            }
+            if character == "\\" {
+                isEscaped = true
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else {
+                    current.append(character)
+                }
+                continue
+            }
+            if character == "\"" || character == "'" {
+                quote = character
+                continue
+            }
+            if character.isWhitespace {
+                if !current.isEmpty {
+                    tokens.append(current)
+                    current = ""
+                }
+                continue
+            }
+            current.append(character)
+        }
+
+        if quote != nil {
+            throw DockerError.commandFailed("Unclosed quote in docker run command.")
+        }
+        if isEscaped {
+            current.append("\\")
+        }
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+        guard !tokens.isEmpty else {
+            throw DockerError.commandFailed("Docker run command is empty.")
+        }
+        return tokens
+    }
+
+    private func normalizeDockerRunVolumeSpec(_ spec: String) -> String {
+        if spec == "~" || spec.hasPrefix("~/") {
+            return expandHomePath(spec)
+        }
+        if spec.hasPrefix("~/"), let colon = spec.firstIndex(of: ":") {
+            let source = String(spec[..<colon])
+            let rest = String(spec[colon...])
+            return expandHomePath(source) + rest
+        }
+        return spec
+    }
+
+    private func dockerRunMountToCompose(_ spec: String) -> String {
+        let parts = spec.split(separator: ",").reduce(into: [String: String]()) { result, chunk in
+            let pair = chunk.split(separator: "=", maxSplits: 1).map(String.init)
+            if pair.count == 2 {
+                result[pair[0].trimmingCharacters(in: .whitespacesAndNewlines)] = pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        guard let target = parts["target"] ?? parts["dst"] ?? parts["destination"] else {
+            return spec
+        }
+        let source = parts["source"] ?? parts["src"] ?? parts["from"]
+        let readOnly = ["true", "1", "yes"].contains((parts["readonly"] ?? parts["ro"] ?? "").lowercased())
+        if let source {
+            return "\(expandHomePath(source)):\(target)\(readOnly ? ":ro" : "")"
+        }
+        return spec
+    }
+
+    private func expandHomePath(_ value: String) -> String {
+        if value == "~" { return NSHomeDirectory() }
+        if value.hasPrefix("~/") {
+            return NSHomeDirectory() + String(value.dropFirst())
+        }
+        return value
+    }
+
+    private func composeProjectSlug(_ value: String) -> String {
+        let slug = value
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9_-]+"#, with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return slug.isEmpty ? "compose" : slug
+    }
+
+    private func simpleComposeDockerRunArguments(for url: URL) async throws -> [String]? {
+        let raw = try await executeCommand("docker", arguments: [
+            "compose",
+            "-f", url.path,
+            "config",
+            "--format", "json",
+            "--no-interpolate",
+            "--no-normalize",
+            "--no-path-resolution"
+        ])
+
+        guard
+            let data = raw.data(using: .utf8),
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            isSimpleComposeContainer(root),
+            let services = root["services"] as? [String: Any],
+            let first = services.first,
+            let service = first.value as? [String: Any],
+            let image = nonEmptyString(service["image"])
+        else {
+            return nil
+        }
+
+        let containerName = nonEmptyString(service["container_name"])
+            ?? composeProjectSlug(url.deletingPathExtension().lastPathComponent)
+        var args = ["-d", "--name", containerName]
+
+        appendOption("--restart", service["restart"], to: &args)
+        appendOption("--hostname", service["hostname"], to: &args)
+        appendOption("--user", service["user"], to: &args)
+        appendOption("--workdir", service["working_dir"], to: &args)
+        appendOption("--entrypoint", service["entrypoint"], to: &args)
+        appendOption("--cpus", service["cpus"], to: &args)
+        appendOption("--memory", service["mem_limit"], to: &args)
+        appendOption("--shm-size", service["shm_size"], to: &args)
+        appendOption("--platform", service["platform"], to: &args)
+
+        for item in service["ports"] as? [Any] ?? [] {
+            if let spec = composePortRunArgument(item), !spec.isEmpty {
+                args += ["-p", spec]
+            }
+        }
+
+        for item in service["volumes"] as? [Any] ?? [] {
+            if let spec = composeVolumeRunArgument(item), !spec.isEmpty {
+                args += ["-v", spec]
+            }
+        }
+
+        appendList("-e", service["environment"], to: &args)
+        appendList("--env-file", service["env_file"], to: &args)
+        appendList("--dns", service["dns"], to: &args)
+        appendList("--add-host", service["extra_hosts"], to: &args)
+        appendList("--label", service["labels"], to: &args)
+        appendList("--tmpfs", service["tmpfs"], to: &args)
+        appendOption("--network", service["network_mode"], to: &args)
+
+        if service["privileged"] as? Bool == true { args.append("--privileged") }
+        if service["read_only"] as? Bool == true { args.append("--read-only") }
+        if service["init"] as? Bool == true { args.append("--init") }
+        args += composeHealthcheckRunArguments(service["healthcheck"])
+
+        args.append(image)
+        if let command = service["command"] as? [Any] {
+            args += command.map { "\($0)" }
+        } else if let command = nonEmptyString(service["command"]) {
+            args += ["sh", "-c", command]
+        }
+
+        return args
+    }
+
+    private func isSimpleComposeContainer(_ root: [String: Any]) -> Bool {
+        guard let services = root["services"] as? [String: Any], services.count == 1 else {
+            return false
+        }
+        for key in ["volumes", "networks", "configs", "secrets"] where hasMeaningfulValue(root[key]) {
+            return false
+        }
+        guard let service = services.first?.value as? [String: Any] else {
+            return false
+        }
+        for key in ["depends_on", "links", "extends", "profiles", "networks"] where hasMeaningfulValue(service[key]) {
+            return false
+        }
+        return nonEmptyString(service["image"]) != nil
+    }
+
+    private func composePortRunArgument(_ item: Any) -> String? {
+        if let text = item as? String { return text }
+        guard let dict = item as? [String: Any], let target = nonEmptyString(dict["target"]) else {
+            return nil
+        }
+        var spec = target
+        if let published = nonEmptyString(dict["published"]) {
+            spec = "\(published):\(target)"
+            if let hostIP = nonEmptyString(dict["host_ip"]) ?? nonEmptyString(dict["hostIp"]) {
+                spec = "\(hostIP):\(spec)"
+            }
+        }
+        if let proto = nonEmptyString(dict["protocol"]), proto != "tcp" {
+            spec += "/\(proto)"
+        }
+        return spec
+    }
+
+    private func composeVolumeRunArgument(_ item: Any) -> String? {
+        if let text = item as? String { return text }
+        guard let dict = item as? [String: Any], let target = nonEmptyString(dict["target"]) else {
+            return nil
+        }
+        let type = nonEmptyString(dict["type"])
+        guard type == nil || type == "bind" || type == "volume" else {
+            return nil
+        }
+        guard let source = nonEmptyString(dict["source"]) else {
+            return nil
+        }
+        let isReadOnly = dict["read_only"] as? Bool == true || nonEmptyString(dict["mode"]) == "ro"
+        return "\(source):\(target)\(isReadOnly ? ":ro" : "")"
+    }
+
+    private func composeHealthcheckRunArguments(_ value: Any?) -> [String] {
+        guard let dict = value as? [String: Any], !dict.isEmpty else { return [] }
+        if dict["disable"] as? Bool == true { return ["--no-healthcheck"] }
+
+        var args: [String] = []
+        if let test = dict["test"] as? [Any], let first = test.first.map({ "\($0)".uppercased() }),
+           first == "CMD" || first == "CMD-SHELL" {
+            args += ["--health-cmd", test.dropFirst().map { "\($0)" }.joined(separator: " ")]
+        } else if let test = nonEmptyString(dict["test"]) {
+            args += ["--health-cmd", test]
+        }
+
+        let mapping = [
+            ("interval", "--health-interval"),
+            ("timeout", "--health-timeout"),
+            ("retries", "--health-retries"),
+            ("start_period", "--health-start-period")
+        ]
+        for (source, flag) in mapping {
+            appendOption(flag, dict[source], to: &args)
+        }
+        return args
+    }
+
+    private func appendOption(_ flag: String, _ value: Any?, to args: inout [String]) {
+        guard let text = nonEmptyString(value) else { return }
+        args += [flag, text]
+    }
+
+    private func appendList(_ flag: String, _ value: Any?, to args: inout [String]) {
+        if let dict = value as? [String: Any] {
+            for key in dict.keys.sorted() {
+                args += [flag, "\(key)=\(dict[key] ?? "")"]
+            }
+            return
+        }
+        for item in value as? [Any] ?? [] {
+            if let dict = item as? [String: Any], let path = nonEmptyString(dict["path"]) {
+                args += [flag, path]
+            } else if let text = nonEmptyString(item) {
+                args += [flag, text]
+            }
+        }
+    }
+
+    private func nonEmptyString(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        let text = "\(value)".trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func hasMeaningfulValue(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        if let array = value as? [Any] { return !array.isEmpty }
+        if let dict = value as? [String: Any] { return !dict.isEmpty }
+        if let text = value as? String { return !text.isEmpty }
+        if value is NSNull { return false }
+        return true
     }
     
     // MARK: - Container Management
@@ -266,6 +1057,229 @@ class DockerManager: ObservableObject {
         let output = try await executeCommand("docker", arguments: ["images", "--format", "{{.Repository}}:{{.Tag}}"])
         return output.components(separatedBy: "\n").filter { !$0.isEmpty }
     }
+
+    func managedImageUpdateItems() async throws -> [ManagedImageInfo] {
+        let targets = managedImageTargets()
+        var items: [ManagedImageInfo] = []
+
+        for target in targets.sorted(by: { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }) {
+            let imageID = try? await executeCommand("docker", arguments: [
+                "image", "inspect",
+                target.reference,
+                "--format", "{{.Id}}"
+            ]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            items.append(
+                ManagedImageInfo(
+                    id: target.reference,
+                    label: target.label,
+                    reference: target.reference,
+                    usedBy: target.usedBy.sorted(),
+                    status: (imageID?.isEmpty == false) ? .installed : .missing,
+                    localImageID: imageID?.isEmpty == false ? imageID : nil
+                )
+            )
+        }
+
+        return items
+    }
+
+    func updateManagedImages(references: [String]) async throws {
+        let uniqueReferences = Array(Set(references)).sorted()
+        guard !uniqueReferences.isEmpty else { return }
+
+        for reference in uniqueReferences {
+            _ = try await executeCommand("docker", arguments: ["pull", reference])
+        }
+    }
+
+    func unusedImages() async throws -> [DockerImageCleanupItem] {
+        let output = try await executeCommand("docker", arguments: [
+            "images",
+            "--no-trunc",
+            "--filter", "dangling=true",
+            "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"
+        ])
+
+        return output
+            .components(separatedBy: .newlines)
+            .compactMap { line -> DockerImageCleanupItem? in
+                let parts = line.components(separatedBy: "\t")
+                guard parts.count >= 5 else { return nil }
+                return DockerImageCleanupItem(
+                    id: parts[0],
+                    repository: parts[1],
+                    tag: parts[2],
+                    imageID: parts[0],
+                    size: parts[3],
+                    createdSince: parts[4]
+                )
+            }
+    }
+
+    func removeUnusedImage(id: String) async throws {
+        _ = try await executeCommand("docker", arguments: ["image", "rm", id])
+    }
+
+    func pruneUnusedImages() async throws {
+        _ = try await executeCommand("docker", arguments: ["image", "prune", "-f"])
+    }
+
+    func unusedVolumes() async throws -> [DockerVolumeCleanupItem] {
+        let namesOutput = try await executeCommand("docker", arguments: [
+            "volume", "ls",
+            "--filter", "dangling=true",
+            "--format", "{{.Name}}"
+        ])
+
+        let names = namesOutput
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var volumes: [DockerVolumeCleanupItem] = []
+        for name in names {
+            let inspect = (try? await executeCommand("docker", arguments: [
+                "volume", "inspect",
+                name,
+                "--format", "{{.Name}}\t{{.Driver}}\t{{.Mountpoint}}"
+            ]).trimmingCharacters(in: .whitespacesAndNewlines)) ?? "\(name)\t\t"
+            let parts = inspect.components(separatedBy: "\t")
+            volumes.append(
+                DockerVolumeCleanupItem(
+                    id: name,
+                    name: parts.indices.contains(0) ? parts[0] : name,
+                    driver: parts.indices.contains(1) ? parts[1] : "",
+                    mountpoint: parts.indices.contains(2) ? parts[2] : ""
+                )
+            )
+        }
+
+        return volumes
+    }
+
+    func removeUnusedVolume(name: String) async throws {
+        _ = try await executeCommand("docker", arguments: ["volume", "rm", name])
+    }
+
+    func containerDirectories(for config: ServerConfiguration, path: String) async throws -> ContainerDirectoryListing {
+        let normalizedPath = normalizeContainerPath(path)
+        let command = "find \"$1\" -mindepth 1 -maxdepth 1 -type d -exec basename {} \\; 2>/dev/null | sort -f; exit 0"
+        let webStatus = await getContainerStatus(config.webContainerName)
+        let output: String
+
+        if webStatus == .running {
+            output = try await executeCommand("docker", arguments: [
+                "exec",
+                config.webContainerName,
+                "sh",
+                "-c",
+                command,
+                "dockamp-container-browser",
+                normalizedPath
+            ])
+        } else {
+            let image = "\(config.webServerType.dockerImage):latest"
+            output = try await executeCommand("docker", arguments: [
+                "run",
+                "--rm",
+                "--entrypoint", "sh",
+                image,
+                "-c",
+                command,
+                "dockamp-container-browser",
+                normalizedPath
+            ])
+        }
+
+        let directories = output
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.contains("/") }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+
+        return ContainerDirectoryListing(
+            path: normalizedPath,
+            parent: normalizedPath == "/" ? nil : parentContainerPath(normalizedPath),
+            directories: directories
+        )
+    }
+
+    private struct ManagedImageTarget {
+        var label: String
+        var reference: String
+        var usedBy: Set<String>
+    }
+
+    private func managedImageTargets() -> [ManagedImageTarget] {
+        var targets: [String: ManagedImageTarget] = [:]
+
+        func add(_ reference: String, label: String, usedBy: String) {
+            let trimmedReference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedReference.isEmpty else { return }
+
+            if var existing = targets[trimmedReference] {
+                existing.usedBy.insert(usedBy)
+                targets[trimmedReference] = existing
+            } else {
+                targets[trimmedReference] = ManagedImageTarget(
+                    label: label,
+                    reference: trimmedReference,
+                    usedBy: [usedBy]
+                )
+            }
+        }
+
+        for config in ConfigurationStore.shared.configurations {
+            add("\(config.webServerType.dockerImage):latest", label: "\(config.webServerType.rawValue) Web Server", usedBy: config.name)
+            add(config.phpDockerImage, label: "PHP \(config.phpVersion)", usedBy: config.name)
+
+            if requiresCustomPHPRuntimeImage(settings: config.phpSettings) {
+                let signature = phpRuntimeSignature(baseImage: config.phpDockerImage, settings: config.phpSettings)
+                add("dockamp-php-runtime:\(signature)", label: "DockAMP PHP Runtime", usedBy: config.name)
+            }
+
+            switch config.databaseAttachmentMode {
+            case .none:
+                break
+            case .global:
+                let shared = SharedDatabaseStore.shared.settings
+                add("\(shared.databaseType.dockerImage):latest", label: "\(shared.databaseType.rawValue) Global Database", usedBy: "Global Database")
+            case .dedicated:
+                add("\(config.databaseType.dockerImage):latest", label: "\(config.databaseType.rawValue) Dedicated Database", usedBy: config.name)
+            }
+        }
+
+        add("phpmyadmin:latest", label: "phpMyAdmin", usedBy: "Database Admin")
+        add("jc21/nginx-proxy-manager:latest", label: "Nginx Proxy Manager", usedBy: "Proxy Manager")
+
+        return Array(targets.values)
+    }
+
+    private func normalizeContainerPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "/" }
+        let absolute = trimmed.hasPrefix("/") ? trimmed : "/\(trimmed)"
+        let parts = absolute
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .filter { $0 != "." }
+            .reduce(into: [Substring]()) { result, part in
+                if part == ".." {
+                    _ = result.popLast()
+                } else {
+                    result.append(part)
+                }
+            }
+        return parts.isEmpty ? "/" : "/" + parts.joined(separator: "/")
+    }
+
+    private func parentContainerPath(_ path: String) -> String {
+        let normalized = normalizeContainerPath(path)
+        guard normalized != "/" else { return "/" }
+        let url = URL(fileURLWithPath: normalized)
+        let parent = url.deletingLastPathComponent().path
+        return parent.isEmpty ? "/" : parent
+    }
     
     // MARK: - Logs
     
@@ -273,6 +1287,187 @@ class DockerManager: ObservableObject {
         let escapedContainerName = escapeForSingleQuotedShell(containerName)
         let command = "docker logs --tail \(tail) '\(escapedContainerName)' 2>&1"
         return try await executeCommand("sh", arguments: ["-lc", command])
+    }
+
+    func liveVisitorActivity(for configs: [ServerConfiguration]) async throws -> [LiveVisitorServerActivity] {
+        var activities: [LiveVisitorServerActivity] = []
+
+        for config in configs {
+            let containerName = config.webContainerName
+            let status = await getContainerStatus(containerName)
+            guard status == .running else { continue }
+
+            let logs = (try? await getContainerLogs(containerName, tail: 300)) ?? ""
+            let rate = await containerNetworkRate(containerName)
+            let visitors = activeVisitors(from: logs)
+
+            activities.append(LiveVisitorServerActivity(
+                id: config.id,
+                serverName: config.name,
+                webPort: config.webServerPort,
+                containerName: containerName,
+                status: status,
+                rxRate: rate.rx,
+                txRate: rate.tx,
+                activeVisitors: visitors
+            ))
+        }
+
+        return activities.sorted {
+            if $0.activeVisitors.count != $1.activeVisitors.count {
+                return $0.activeVisitors.count > $1.activeVisitors.count
+            }
+            return $0.serverName.localizedCaseInsensitiveCompare($1.serverName) == .orderedAscending
+        }
+    }
+
+    private func activeVisitors(from logs: String) -> [LiveVisitorEntry] {
+        let cutoff = Date().addingTimeInterval(-300)
+        var visitors: [String: ParsedAccessLogEntry] = [:]
+        var requestCounts: [String: Int] = [:]
+
+        for line in logs.split(separator: "\n").map(String.init) {
+            guard let entry = parseAccessLogLine(line), entry.timestamp >= cutoff else { continue }
+            let key = "\(entry.ip)|\(entry.userAgent)"
+            requestCounts[key, default: 0] += 1
+            if let current = visitors[key], current.timestamp > entry.timestamp {
+                continue
+            }
+            visitors[key] = entry
+        }
+
+        let now = Date()
+        return visitors
+            .map { key, entry in
+                LiveVisitorEntry(
+                    ip: entry.ip,
+                    userAgent: entry.userAgent,
+                    method: entry.method,
+                    path: entry.path,
+                    status: entry.status,
+                    lastSeenSecondsAgo: max(0, Int(now.timeIntervalSince(entry.timestamp))),
+                    requests: requestCounts[key, default: 1]
+                )
+            }
+            .sorted { $0.lastSeenSecondsAgo < $1.lastSeenSecondsAgo }
+    }
+
+    private func parseAccessLogLine(_ line: String) -> ParsedAccessLogEntry? {
+        let pattern = #"^(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+)(?: "([^"]*)" "([^"]*)")?(?: "([^"]*)" "([^"]*)")?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) else {
+            return nil
+        }
+
+        func group(_ index: Int) -> String {
+            guard index < match.numberOfRanges,
+                  let range = Range(match.range(at: index), in: line) else { return "" }
+            return String(line[range])
+        }
+
+        var ip = group(1)
+        for candidate in [group(9), group(10)] {
+            let forwardedIP = candidate.split(separator: ",").first.map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            if !forwardedIP.isEmpty && forwardedIP != "-" {
+                ip = forwardedIP
+                break
+            }
+        }
+
+        let timestamp = parseAccessLogDate(group(2)) ?? Date()
+        return ParsedAccessLogEntry(
+            ip: ip,
+            timestamp: timestamp,
+            method: group(3),
+            path: group(4),
+            status: group(5),
+            userAgent: group(8)
+        )
+    }
+
+    private func parseAccessLogDate(_ rawValue: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "dd/MMM/yyyy:HH:mm:ss Z"
+        return formatter.date(from: rawValue)
+    }
+
+    private func containerNetworkRate(_ containerName: String) async -> (rx: String, tx: String) {
+        guard let output = try? await executeCommand("docker", arguments: [
+            "stats",
+            "--no-stream",
+            "--format", "{{.NetIO}}",
+            containerName
+        ]) else {
+            return ("0 B/s", "0 B/s")
+        }
+
+        let parts = output
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: "/")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard parts.count == 2 else { return ("0 B/s", "0 B/s") }
+
+        let now = Date()
+        let rxBytes = parseDockerByteSize(parts[0])
+        let txBytes = parseDockerByteSize(parts[1])
+        let previous = netStatsCache[containerName]
+        netStatsCache[containerName] = (now, rxBytes, txBytes)
+
+        guard let previous else {
+            return ("0 B/s", "0 B/s")
+        }
+
+        let elapsed = max(now.timeIntervalSince(previous.date), 0.001)
+        let rxRate = max(0, (rxBytes - previous.rxBytes) / elapsed)
+        let txRate = max(0, (txBytes - previous.txBytes) / elapsed)
+        return (formatByteRate(rxRate), formatByteRate(txRate))
+    }
+
+    private func parseDockerByteSize(_ value: String) -> Double {
+        let compact = value.replacingOccurrences(of: " ", with: "")
+        let pattern = #"^([0-9.]+)([A-Za-z]+)?$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: compact, range: NSRange(compact.startIndex..., in: compact)),
+              let numberRange = Range(match.range(at: 1), in: compact) else {
+            return 0
+        }
+
+        let number = Double(compact[numberRange]) ?? 0
+        let unit: String
+        if let unitRange = Range(match.range(at: 2), in: compact) {
+            unit = String(compact[unitRange]).lowercased()
+        } else {
+            unit = "b"
+        }
+
+        let factors: [String: Double] = [
+            "b": 1,
+            "kb": 1_000,
+            "mb": 1_000_000,
+            "gb": 1_000_000_000,
+            "tb": 1_000_000_000_000,
+            "kib": 1_024,
+            "mib": 1_048_576,
+            "gib": 1_073_741_824,
+            "tib": 1_099_511_627_776
+        ]
+
+        return number * (factors[unit] ?? 1)
+    }
+
+    private func formatByteRate(_ bytesPerSecond: Double) -> String {
+        var value = max(0, bytesPerSecond)
+        for unit in ["B/s", "KB/s", "MB/s", "GB/s"] {
+            if value < 1_000 || unit == "GB/s" {
+                if unit == "B/s" {
+                    return "\(Int(value)) \(unit)"
+                }
+                return String(format: "%.1f %@", value, unit)
+            }
+            value /= 1_000
+        }
+        return "0 B/s"
     }
 
     func fixDocumentRootPermissions(path: String) async throws {
@@ -1808,6 +3003,60 @@ class DockerManager: ObservableObject {
             return outputString
         }.value
     }
+}
+
+private struct ParsedAccessLogEntry {
+    let ip: String
+    let timestamp: Date
+    let method: String
+    let path: String
+    let status: String
+    let userAgent: String
+}
+
+private struct DockerPSRow: Decodable {
+    let names: String
+    let image: String
+    let state: String
+    let status: String
+    let ports: String
+
+    private enum CodingKeys: String, CodingKey {
+        case names = "Names"
+        case image = "Image"
+        case state = "State"
+        case status = "Status"
+        case ports = "Ports"
+    }
+}
+
+private struct DockerRunComposeService {
+    var name = ""
+    var image = ""
+    var ports: [String] = []
+    var volumes: [String] = []
+    var environment: [String] = []
+    var envFile: [String] = []
+    var dns: [String] = []
+    var restart = ""
+    var networkMode = ""
+    var networks: [String] = []
+    var extraHosts: [String] = []
+    var labels: [String] = []
+    var hostname = ""
+    var user = ""
+    var workingDir = ""
+    var entrypoint = ""
+    var healthcheck: [String: Any] = [:]
+    var cpus = ""
+    var memLimit = ""
+    var privileged = false
+    var readOnly = false
+    var tmpfs: [String] = []
+    var shmSize = ""
+    var initEnabled = false
+    var platform = ""
+    var command: [String] = []
 }
 
 // MARK: - Errors

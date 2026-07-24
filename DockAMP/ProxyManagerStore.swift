@@ -31,6 +31,7 @@ class ProxyManagerStore: ObservableObject {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(settings)
             try data.write(to: saveURL)
+            _ = try? ComposeExportManager.shared.exportNow()
         } catch {
             print("Error saving Proxy Manager settings: \(error)")
         }

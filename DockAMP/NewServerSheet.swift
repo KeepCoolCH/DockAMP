@@ -8,7 +8,7 @@ struct NewServerSheet: View {
     @State private var serverName = ""
     @State private var webServerType: WebServerType = .nginx
     @State private var phpVersion: String = PHPVersionCatalog.defaultVersion
-    @State private var webPort = 8080
+    @State private var webPort = 8081
     @State private var documentRoot = NSHomeDirectory() + "/Sites"
     @State private var mountRows: [MountRowEntry] = []
     @State private var databaseMode: DatabaseAttachmentMode = .global
@@ -20,6 +20,12 @@ struct NewServerSheet: View {
     @State private var databasePassword = "devpassword"
     @State private var didEditDatabaseName = false
     @State private var didEditDatabaseUsername = false
+    @State private var showingContainerPathBrowser = false
+    @State private var containerPathBrowserMountID: UUID?
+    @State private var containerBrowserPath = "/"
+    @State private var containerBrowserListing: ContainerDirectoryListing?
+    @State private var isLoadingContainerBrowser = false
+    @State private var containerBrowserError: String?
     
     var body: some View {
         NavigationStack {
@@ -115,14 +121,30 @@ struct NewServerSheet: View {
                             Text("Host Path")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                            TextField("/Users/.../ordner", text: $row.hostPath)
-                                .textFieldStyle(.roundedBorder)
+                            HStack {
+                                TextField("/Users/.../ordner", text: $row.hostPath)
+                                    .textFieldStyle(.roundedBorder)
+
+                                Button {
+                                    selectAdditionalMountHostPath(row.id)
+                                } label: {
+                                    Label("Choose...", systemImage: "folder")
+                                }
+                            }
 
                             Text("Container Path")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
-                            TextField("/var/www/ordner", text: $row.containerPath)
-                                .textFieldStyle(.roundedBorder)
+                            HStack {
+                                TextField("/var/www/ordner", text: $row.containerPath)
+                                    .textFieldStyle(.roundedBorder)
+
+                                Button {
+                                    openContainerPathBrowser(for: row.id, currentPath: row.containerPath)
+                                } label: {
+                                    Label("Browse...", systemImage: "shippingbox")
+                                }
+                            }
 
                             HStack {
                                 Toggle("Read only (ro)", isOn: $row.readOnly)
@@ -205,6 +227,115 @@ struct NewServerSheet: View {
         .task {
             await phpVersionStore.refreshIfNeeded()
         }
+        .sheet(isPresented: $showingContainerPathBrowser) {
+            containerPathBrowserSheet
+        }
+    }
+
+    private var containerPathBrowserSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Container Path Browser")
+                        .font(.title2.bold())
+                    Text("\(webServerType.rawValue) container filesystem")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button("Cancel") {
+                    showingContainerPathBrowser = false
+                }
+
+                Button("Use Path") {
+                    applySelectedContainerPath()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+            .background(.ultraThinMaterial)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    TextField("Path", text: $containerBrowserPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                        .onSubmit {
+                            Task { await loadContainerDirectories(path: containerBrowserPath) }
+                        }
+
+                    Button {
+                        Task { await loadContainerDirectories(path: containerBrowserPath) }
+                    } label: {
+                        Label("Go", systemImage: "arrow.right.circle")
+                    }
+                    .disabled(isLoadingContainerBrowser)
+                }
+
+                HStack {
+                    Button {
+                        if let parent = containerBrowserListing?.parent {
+                            Task { await loadContainerDirectories(path: parent) }
+                        }
+                    } label: {
+                        Label("Parent", systemImage: "arrow.up")
+                    }
+                    .disabled(containerBrowserListing?.parent == nil || isLoadingContainerBrowser)
+
+                    Button {
+                        Task { await loadContainerDirectories(path: "/") }
+                    } label: {
+                        Label("Root", systemImage: "house")
+                    }
+                    .disabled(isLoadingContainerBrowser)
+
+                    Spacer()
+
+                    if isLoadingContainerBrowser {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                if let containerBrowserError {
+                    Label(containerBrowserError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                List {
+                    ForEach(containerBrowserListing?.directories ?? [], id: \.self) { directory in
+                        Button {
+                            Task { await loadContainerDirectories(path: joinedContainerPath(containerBrowserPath, directory)) }
+                        } label: {
+                            Label(directory, systemImage: "folder")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(minHeight: 300)
+                .overlay {
+                    if !isLoadingContainerBrowser && (containerBrowserListing?.directories ?? []).isEmpty {
+                        ContentUnavailableView(
+                            "No subdirectories",
+                            systemImage: "folder",
+                            description: Text("Use this path or type another absolute container path.")
+                        )
+                    }
+                }
+
+                Text("DockAMP uses the selected webserver image as a temporary helper while this server has not been created yet.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+        }
+        .frame(minWidth: 620, minHeight: 520)
     }
     
     private func createServer() {
@@ -232,16 +363,87 @@ struct NewServerSheet: View {
     }
     
     private func selectDocumentRoot() {
+        selectFolder(message: "Select the document root directory") { url in
+            documentRoot = url.path
+        }
+    }
+
+    private func selectAdditionalMountHostPath(_ id: UUID) {
+        selectFolder(message: "Select an additional host directory") { url in
+            guard let index = mountRows.firstIndex(where: { $0.id == id }) else { return }
+            mountRows[index].hostPath = url.path
+        }
+    }
+
+    private func selectFolder(message: String, onSelect: (URL) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = true
-        panel.message = "Select the document root directory"
-        
+        panel.message = message
+
         if panel.runModal() == .OK, let url = panel.url {
-            documentRoot = url.path
+            onSelect(url)
         }
+    }
+
+    private func openContainerPathBrowser(for id: UUID, currentPath: String) {
+        containerPathBrowserMountID = id
+        containerBrowserPath = currentPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultContainerRootPath : currentPath
+        containerBrowserListing = nil
+        containerBrowserError = nil
+        showingContainerPathBrowser = true
+
+        Task {
+            await loadContainerDirectories(path: containerBrowserPath)
+        }
+    }
+
+    private var defaultContainerRootPath: String {
+        switch webServerType {
+        case .apache:
+            return "/usr/local/apache2"
+        case .nginx:
+            return "/var/www"
+        }
+    }
+
+    private func loadContainerDirectories(path: String) async {
+        isLoadingContainerBrowser = true
+        containerBrowserError = nil
+        defer { isLoadingContainerBrowser = false }
+
+        do {
+            var config = ServerConfiguration(name: serverName.isEmpty ? "new-server" : serverName)
+            config.webServerType = webServerType
+            config.webServerDocumentRoot = documentRoot
+            let listing = try await DockerManager.shared.containerDirectories(for: config, path: path)
+            containerBrowserListing = listing
+            containerBrowserPath = listing.path
+        } catch {
+            containerBrowserError = error.localizedDescription
+        }
+    }
+
+    private func applySelectedContainerPath() {
+        guard let id = containerPathBrowserMountID,
+              let index = mountRows.firstIndex(where: { $0.id == id }) else {
+            showingContainerPathBrowser = false
+            return
+        }
+
+        mountRows[index].containerPath = containerBrowserPath
+        showingContainerPathBrowser = false
+    }
+
+    private func joinedContainerPath(_ base: String, _ child: String) -> String {
+        let trimmedBase = base.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let trimmedChild = child.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmedBase.isEmpty {
+            return "/\(trimmedChild)"
+        }
+        return "/\(trimmedBase)/\(trimmedChild)"
     }
 
     private func addMountRow() {
@@ -286,7 +488,7 @@ struct NewServerSheet: View {
     }
 
     private func nextAvailableWebPort(startingAt startPort: Int) -> Int {
-        let minimumPort = max(1, startPort)
+        let minimumPort = max(8081, startPort)
         let usedPorts = Set(configStore.configurations.map { $0.webServerPort })
 
         var candidate = minimumPort

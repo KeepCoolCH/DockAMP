@@ -77,6 +77,7 @@ class SharedDatabaseStore: ObservableObject {
 
             let data = try encoder.encode(envelope)
             try data.write(to: saveURL)
+            _ = try? ComposeExportManager.shared.exportNow()
         } catch {
             print("Error saving database settings: \(error)")
         }

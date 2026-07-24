@@ -15,6 +15,7 @@ class ConfigurationStore: ObservableObject {
     private let legacyCentralDatabaseConfigFileURL: URL
     private let legacySaveURL: URL
     private let legacyOldRootSaveURL: URL
+    private var isReadyForAutomaticComposeExport = false
     
     private init() {
         let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -33,10 +34,12 @@ class ConfigurationStore: ObservableObject {
             let defaultConfig = ServerConfiguration(name: "Development Server")
             configurations.append(defaultConfig)
             selectedConfiguration = defaultConfig
-            saveConfigurations()
+            saveConfigurations(updateComposeExport: false)
         } else {
             selectedConfiguration = configurations.first
         }
+
+        isReadyForAutomaticComposeExport = true
     }
 
     private func prepareStorageDirectories() {
@@ -51,12 +54,15 @@ class ConfigurationStore: ObservableObject {
     
     // MARK: - Persistence
     
-    func saveConfigurations() {
+    func saveConfigurations(updateComposeExport: Bool = true) {
         for config in configurations {
             saveServerConfigurationFile(for: config)
         }
         saveDatabaseConfigurationsFile()
         removeOrphanedConfigurationFiles()
+        if updateComposeExport && isReadyForAutomaticComposeExport {
+            _ = try? ComposeExportManager.shared.exportNow()
+        }
     }
     
     func loadConfigurations() {
@@ -69,7 +75,7 @@ class ConfigurationStore: ObservableObject {
         let legacyConfigs = loadLegacyConfigurations()
         if !legacyConfigs.isEmpty {
             configurations = legacyConfigs
-            saveConfigurations()
+            saveConfigurations(updateComposeExport: false)
             try? FileManager.default.removeItem(at: legacySaveURL)
             try? FileManager.default.removeItem(at: legacyOldRootSaveURL)
             return
