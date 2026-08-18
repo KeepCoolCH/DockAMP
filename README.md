@@ -2,8 +2,8 @@
 
 # 🐳 DockAMP Docker image or separate macOS app
 
-**DockAMP** is a Docker image with a responsive web interface to manage official Apache/Nginx, PHP, MySQL/MariaDB/PostgeSQL and proxy containers in Docker - also available as a macOS app.
-Docker version **1.2** | macOS version **1.2** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
+**DockAMP** is a Docker image with a responsive web interface to manage official Apache/Nginx, PHP, Python, Node.js, MySQL/MariaDB/PostgeSQL and proxy containers in Docker - also available as a macOS app.
+Docker version **1.3** | macOS version **1.2** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
 
 ---
 
@@ -22,9 +22,16 @@ Docker version **1.2** | macOS version **1.2** | developed by **Kevin Tobler** �
 ### 🚀 Main features of the Docker version
 
 - Browser-based management interface in English and German
-- Apache or Nginx for each server
+- Web/PHP, Python, or Node.js server types
+- Apache or Nginx for each Web/PHP server
 - Automatic PHP version discovery with legacy PHP versions available
+- Automatic Python and Node.js version discovery
 - Advanced PHP, Apache, and Nginx configuration with structured dropdowns for common values
+- Python app support with FastAPI, Flask, Django, Streamlit, Gradio, and generic Python apps
+- Node.js app support with Express, Fastify, Next.js, Vite, Nuxt, and generic Node.js apps
+- Per-app start commands, install commands, package/runtime settings, and automatic default starter files
+- Python requirements management with per-server requirements files and optional virtualenv volumes
+- Node.js package handling with `package.json`/lockfile detection and optional `node_modules` Docker volumes
 - Apache and Nginx security header controls for X-Frame-Options, Referrer-Policy, CSP, and related directives
 - MySQL, MariaDB, and PostgreSQL
 - Shared global or dedicated per-server database containers
@@ -43,20 +50,20 @@ Docker version **1.2** | macOS version **1.2** | developed by **Kevin Tobler** �
 - Storage migration between Docker volumes and host mounts where supported
 - Host folder browser for document roots, host mounts, additional server mounts, and backup targets
 - Folder creation and safer folder deletion dialogs in folder browser views
-- Website file browser for document roots and additional mounts
+- Website and app file browser for document roots, Python apps, Node.js apps, and additional mounts
 - Upload files or whole folders directly through the browser
 - Rename, copy, move, delete, and download website files or folders
 - Download folders as compressed archives
-- Webserver permission checks for document roots and additional mounts, with a repair action for safe read and traversal permissions
-- Global image update checker for DockAMP-managed images, including DockAMP itself, web servers, PHP runtimes, database tools, proxy, Adminer, phpMyAdmin, and helper images
+- Webserver and app permission checks for document roots, app paths, package/requirements files, and additional mounts, with repair actions
+- Global image update checker for DockAMP-managed images, including DockAMP itself, web servers, PHP runtimes, Python and Node.js runtimes, database tools, proxy, Adminer, phpMyAdmin, and helper images
 - DockAMP-managed unused image cleanup
 - DockAMP-managed unused volume overview with individual delete actions
 - User login and account management
 - Automatic container restart and auto-start options
 - Backup and restore support for Docker volumes and host-mounted storage paths
-- Backup selection for DockAMP config, sites/runtime files, mounted web paths, dedicated databases, global database, and Proxy Manager data
+- Backup selection for DockAMP config, sites/runtime files, Python and Node.js app files, mounted web/app paths, dedicated databases, global database, and Proxy Manager data
 - Optional restore selection per backup archive plus backup download as a compressed archive
-- DockAMP automatically exports Docker Compose files so your containers can be started without DockAMP if needed.
+- DockAMP automatically exports Docker Compose files, runtime files, Python requirements, and Node.js recovery commands so your containers can be started without DockAMP if needed.
 
 ### Linux and NAS
 
