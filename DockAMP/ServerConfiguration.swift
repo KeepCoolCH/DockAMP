@@ -1,5 +1,13 @@
 import Foundation
 
+enum ServerType: String, CaseIterable, Codable {
+    case php = "Web/PHP"
+    case python = "Python"
+    case node = "Node.js"
+
+    var isAppServer: Bool { self != .php }
+}
+
 enum WebServerType: String, CaseIterable, Codable {
     case apache = "Apache"
     case nginx = "Nginx"
@@ -98,6 +106,7 @@ struct ServerConfiguration: Codable, Identifiable {
     var createdAt: Date
     var updatedAt: Date
     var autoStartOnAppLaunch: Bool
+    var serverType: ServerType
     
     var webServerType: WebServerType
     var webServerPort: Int
@@ -113,6 +122,12 @@ struct ServerConfiguration: Codable, Identifiable {
     var phpCPUs: String
     var phpMemoryLimit: String
     var phpSettings: PHPSettings
+    var pythonSettings: PythonServerSettings
+    var nodeSettings: NodeServerSettings
+    var npmProxyEnabled: Bool
+    var npmProxyHostID: Int?
+    var npmProxyStatus: String
+    var npmProxyError: String
     
     var databaseAttachmentMode: DatabaseAttachmentMode
     var databaseType: DatabaseType
@@ -123,6 +138,15 @@ struct ServerConfiguration: Codable, Identifiable {
 
     var webContainerName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_web" }
     var phpContainerName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_php" }
+    var pythonContainerName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_python" }
+    var nodeContainerName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_node" }
+    var primaryContainerName: String {
+        switch serverType {
+        case .php: return webContainerName
+        case .python: return pythonContainerName
+        case .node: return nodeContainerName
+        }
+    }
     var dbContainerName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_db" }
     var dbDataVolumeName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_database_data" }
     var networkName: String { "\(name.lowercased().replacingOccurrences(of: " ", with: "_"))_network" }
@@ -134,6 +158,7 @@ struct ServerConfiguration: Codable, Identifiable {
         self.createdAt = Date()
         self.updatedAt = Date()
         self.autoStartOnAppLaunch = true
+        self.serverType = .php
         
         self.webServerType = .nginx
         self.webServerPort = 8081
@@ -149,6 +174,12 @@ struct ServerConfiguration: Codable, Identifiable {
         self.phpCPUs = ""
         self.phpMemoryLimit = ""
         self.phpSettings = PHPSettings()
+        self.pythonSettings = PythonServerSettings()
+        self.nodeSettings = NodeServerSettings()
+        self.npmProxyEnabled = false
+        self.npmProxyHostID = nil
+        self.npmProxyStatus = "disabled"
+        self.npmProxyError = ""
         
         self.databaseType = .mysql
         self.databasePort = 3306
@@ -164,6 +195,7 @@ struct ServerConfiguration: Codable, Identifiable {
         case createdAt
         case updatedAt
         case autoStartOnAppLaunch
+        case serverType
         case webServerType
         case webServerPort
         case webServerDocumentRoot
@@ -177,6 +209,12 @@ struct ServerConfiguration: Codable, Identifiable {
         case phpCPUs
         case phpMemoryLimit
         case phpSettings
+        case pythonSettings
+        case nodeSettings
+        case npmProxyEnabled
+        case npmProxyHostID
+        case npmProxyStatus
+        case npmProxyError
         case databaseType
         case databasePort
         case dedicatedDatabaseCPUs
@@ -193,6 +231,7 @@ struct ServerConfiguration: Codable, Identifiable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         autoStartOnAppLaunch = try container.decodeIfPresent(Bool.self, forKey: .autoStartOnAppLaunch) ?? false
+        serverType = try container.decodeIfPresent(ServerType.self, forKey: .serverType) ?? .php
         webServerType = try container.decodeIfPresent(WebServerType.self, forKey: .webServerType) ?? .nginx
         webServerPort = try container.decodeIfPresent(Int.self, forKey: .webServerPort) ?? 8081
         webServerDocumentRoot = try container.decodeIfPresent(String.self, forKey: .webServerDocumentRoot) ?? (NSHomeDirectory() + "/Sites")
@@ -207,12 +246,127 @@ struct ServerConfiguration: Codable, Identifiable {
         phpCPUs = try container.decodeIfPresent(String.self, forKey: .phpCPUs) ?? ""
         phpMemoryLimit = try container.decodeIfPresent(String.self, forKey: .phpMemoryLimit) ?? ""
         phpSettings = try container.decodeIfPresent(PHPSettings.self, forKey: .phpSettings) ?? PHPSettings()
+        pythonSettings = try container.decodeIfPresent(PythonServerSettings.self, forKey: .pythonSettings) ?? PythonServerSettings()
+        nodeSettings = try container.decodeIfPresent(NodeServerSettings.self, forKey: .nodeSettings) ?? NodeServerSettings()
+        npmProxyEnabled = try container.decodeIfPresent(Bool.self, forKey: .npmProxyEnabled) ?? false
+        npmProxyHostID = try container.decodeIfPresent(Int.self, forKey: .npmProxyHostID)
+        npmProxyStatus = try container.decodeIfPresent(String.self, forKey: .npmProxyStatus) ?? (npmProxyEnabled ? "not_created" : "disabled")
+        npmProxyError = try container.decodeIfPresent(String.self, forKey: .npmProxyError) ?? ""
         databaseType = try container.decodeIfPresent(DatabaseType.self, forKey: .databaseType) ?? .mysql
         databasePort = try container.decodeIfPresent(Int.self, forKey: .databasePort) ?? 3306
         dedicatedDatabaseCPUs = try container.decodeIfPresent(String.self, forKey: .dedicatedDatabaseCPUs) ?? ""
         dedicatedDatabaseMemoryLimit = try container.decodeIfPresent(String.self, forKey: .dedicatedDatabaseMemoryLimit) ?? ""
         databaseSettings = try container.decodeIfPresent(DatabaseSettings.self, forKey: .databaseSettings) ?? DatabaseSettings()
         databaseAttachmentMode = try container.decodeIfPresent(DatabaseAttachmentMode.self, forKey: .databaseAttachmentMode) ?? .global
+    }
+}
+
+struct PythonServerSettings: Codable {
+    var version = "3.13"
+    var framework: PythonFramework = .generic
+    var containerPort = 8000
+    var startCommand = "python app.py"
+    var requirements = ""
+
+    private enum CodingKeys: String, CodingKey { case version, framework, containerPort, startCommand, requirements }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? "3.13"
+        framework = try container.decodeIfPresent(PythonFramework.self, forKey: .framework) ?? .generic
+        containerPort = try container.decodeIfPresent(Int.self, forKey: .containerPort) ?? 8000
+        startCommand = try container.decodeIfPresent(String.self, forKey: .startCommand) ?? "python app.py"
+        requirements = try container.decodeIfPresent(String.self, forKey: .requirements) ?? ""
+    }
+}
+
+struct NodeServerSettings: Codable {
+    var version = "22"
+    var framework: NodeFramework = .generic
+    var containerPort = 3000
+    var startCommand = "npm start"
+    var installCommand = "npm install"
+    var useNodeModulesVolume = true
+
+    private enum CodingKeys: String, CodingKey { case version, framework, containerPort, startCommand, installCommand, useNodeModulesVolume }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? "22"
+        framework = try container.decodeIfPresent(NodeFramework.self, forKey: .framework) ?? .generic
+        containerPort = try container.decodeIfPresent(Int.self, forKey: .containerPort) ?? 3000
+        startCommand = try container.decodeIfPresent(String.self, forKey: .startCommand) ?? "npm start"
+        installCommand = try container.decodeIfPresent(String.self, forKey: .installCommand) ?? "npm install"
+        useNodeModulesVolume = try container.decodeIfPresent(Bool.self, forKey: .useNodeModulesVolume) ?? true
+    }
+}
+
+enum PythonFramework: String, CaseIterable, Codable, Identifiable {
+    case generic, fastapi, flask, django, streamlit, gradio
+
+    var id: String { rawValue }
+    var displayName: String { rawValue == "generic" ? "Generic" : rawValue.capitalized }
+    var containerPort: Int {
+        switch self {
+        case .flask: return 5000
+        case .streamlit: return 8501
+        case .gradio: return 7860
+        default: return 8000
+        }
+    }
+    var startCommand: String {
+        switch self {
+        case .generic: return "python app.py"
+        case .fastapi: return "uvicorn main:app --host 0.0.0.0 --port 8000"
+        case .flask: return "flask run --host 0.0.0.0 --port 5000"
+        case .django: return "python manage.py runserver 0.0.0.0:8000"
+        case .streamlit: return "streamlit run app.py --server.address 0.0.0.0 --server.port 8501"
+        case .gradio: return "python app.py"
+        }
+    }
+    var suggestedRequirements: String {
+        switch self {
+        case .generic: return ""
+        case .fastapi: return "fastapi\nuvicorn[standard]"
+        case .flask: return "flask"
+        case .django: return "django"
+        case .streamlit: return "streamlit"
+        case .gradio: return "gradio"
+        }
+    }
+}
+
+enum NodeFramework: String, CaseIterable, Codable, Identifiable {
+    case generic, express, fastify, next, vite, nuxt
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .generic: return "Generic"
+        case .next: return "Next.js"
+        case .vite: return "Vite"
+        case .nuxt: return "Nuxt"
+        default: return rawValue.capitalized
+        }
+    }
+    var containerPort: Int { self == .vite ? 5173 : 3000 }
+    var startCommand: String {
+        switch self {
+        case .generic, .express, .fastify: return "npm start"
+        case .next: return "npm run dev -- --hostname 0.0.0.0 --port 3000"
+        case .vite: return "npm run dev -- --host 0.0.0.0 --port 5173"
+        case .nuxt: return "npm run dev -- --host 0.0.0.0 --port 3000"
+        }
+    }
+    var installCommand: String {
+        switch self {
+        case .generic: return "npm install"
+        case .express: return "npm install express"
+        case .fastify: return "npm install fastify"
+        case .next: return "npm install next react react-dom"
+        case .vite: return "npm install @vitejs/plugin-react vite react react-dom"
+        case .nuxt: return "npm install nuxt"
+        }
     }
 }
 
@@ -707,6 +861,8 @@ struct ProxyManagerSettings: Codable {
     var httpsPort: Int = 443
     var adminIp: String = ""
     var adminPort: Int = 81
+    var adminEmail: String = ""
+    var adminPassword: String = ""
     var useNamedVolumes: Bool = true
     var dataMountPath: String = NSHomeDirectory() + "/Docker/DockAMP/nginx-proxy-manager/data"
     var letsEncryptMountPath: String = NSHomeDirectory() + "/Docker/DockAMP/nginx-proxy-manager/letsencrypt"
@@ -716,7 +872,7 @@ struct ProxyManagerSettings: Codable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case mode, isEnabled, autoStartOnAppLaunch, httpPort, httpsPort, adminIp, adminPort, useNamedVolumes, dataMountPath, letsEncryptMountPath, cpus, memoryLimit
+        case mode, isEnabled, autoStartOnAppLaunch, httpPort, httpsPort, adminIp, adminPort, adminEmail, adminPassword, useNamedVolumes, dataMountPath, letsEncryptMountPath, cpus, memoryLimit
     }
 
     init(from decoder: Decoder) throws {
@@ -729,6 +885,8 @@ struct ProxyManagerSettings: Codable {
         httpsPort = try container.decodeIfPresent(Int.self, forKey: .httpsPort) ?? httpsPort
         adminIp = try container.decodeIfPresent(String.self, forKey: .adminIp) ?? adminIp
         adminPort = try container.decodeIfPresent(Int.self, forKey: .adminPort) ?? adminPort
+        adminEmail = try container.decodeIfPresent(String.self, forKey: .adminEmail) ?? adminEmail
+        adminPassword = try container.decodeIfPresent(String.self, forKey: .adminPassword) ?? adminPassword
         useNamedVolumes = try container.decodeIfPresent(Bool.self, forKey: .useNamedVolumes) ?? useNamedVolumes
         dataMountPath = try container.decodeIfPresent(String.self, forKey: .dataMountPath) ?? dataMountPath
         letsEncryptMountPath = try container.decodeIfPresent(String.self, forKey: .letsEncryptMountPath) ?? letsEncryptMountPath

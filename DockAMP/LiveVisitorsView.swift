@@ -7,6 +7,7 @@ struct LiveVisitorsView: View {
 
     @State private var activities: [LiveVisitorServerActivity] = []
     @State private var isLoading = false
+    @State private var speedLoadingServerIDs: Set<UUID> = []
     @State private var autoRefresh = true
     @State private var errorMessage: String?
     @State private var showError = false
@@ -31,7 +32,6 @@ struct LiveVisitorsView: View {
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
-                .disabled(isLoading)
 
                 Button("Close") {
                     dismiss()
@@ -43,7 +43,7 @@ struct LiveVisitorsView: View {
             Divider()
 
             ScrollView {
-                if activities.isEmpty && !isLoading {
+                if activities.isEmpty {
                     ContentUnavailableView(
                         "No active visitors found",
                         systemImage: "eye",
@@ -59,13 +59,6 @@ struct LiveVisitorsView: View {
                     .padding()
                 }
             }
-            .overlay {
-                if isLoading {
-                    ProgressView("Loading activity...")
-                        .padding()
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                }
-            }
         }
         .frame(minWidth: 820, minHeight: 580)
         .alert("Live visitors failed", isPresented: $showError) {
@@ -79,23 +72,77 @@ struct LiveVisitorsView: View {
         .task(id: autoRefresh) {
             guard autoRefresh else { return }
             while autoRefresh && !Task.isCancelled {
-                await loadActivity(showSpinner: false)
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(5))
+                await loadActivity()
             }
         }
     }
 
-    private func loadActivity(showSpinner: Bool = true) async {
-        if showSpinner { isLoading = true }
-        defer {
-            if showSpinner { isLoading = false }
+    private func loadActivity() async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        let configurations = configStore.configurations
+
+        guard !configurations.isEmpty else {
+            activities.removeAll()
+            return
         }
 
-        do {
-            activities = try await dockerManager.liveVisitorActivity(for: configStore.configurations)
-        } catch {
-            errorMessage = error.localizedDescription
-            showError = true
+        let output = try? await dockerManager.executeCommand(
+            "docker",
+            arguments: ["ps", "--format", "{{.Names}}"]
+        )
+        let runningContainerNames = Set(
+            (output ?? "")
+                .split(whereSeparator: \.isNewline)
+                .map(String.init)
+        )
+        let runningConfigurations = configurations.filter {
+            runningContainerNames.contains($0.primaryContainerName)
+        }
+        let runningIDs = Set(runningConfigurations.map(\.id))
+        activities.removeAll { !runningIDs.contains($0.id) }
+
+        for config in runningConfigurations {
+            guard !Task.isCancelled else { return }
+            let activity = await dockerManager.liveVisitorActivity(
+                for: config,
+                includeNetworkRate: false
+            )
+            activities.removeAll { $0.id == config.id }
+            if let activity { activities.append(activity) }
+            sortActivitiesByServerOrder()
+            loadNetworkRate(for: config)
+        }
+    }
+
+    private func sortActivitiesByServerOrder() {
+        let positions = Dictionary(
+            uniqueKeysWithValues: configStore.configurations.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        activities.sort {
+            (positions[$0.id] ?? Int.max) < (positions[$1.id] ?? Int.max)
+        }
+    }
+
+    private func loadNetworkRate(for config: ServerConfiguration) {
+        guard speedLoadingServerIDs.insert(config.id).inserted else { return }
+        Task {
+            let rate = await dockerManager.liveVisitorNetworkRate(for: config)
+            speedLoadingServerIDs.remove(config.id)
+            guard let index = activities.firstIndex(where: { $0.id == config.id }) else { return }
+            let current = activities[index]
+            activities[index] = LiveVisitorServerActivity(
+                id: current.id,
+                serverName: current.serverName,
+                webPort: current.webPort,
+                containerName: current.containerName,
+                status: current.status,
+                rxRate: rate.rx,
+                txRate: rate.tx,
+                activeVisitors: current.activeVisitors
+            )
         }
     }
 }
@@ -110,7 +157,7 @@ private struct LiveVisitorServerCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(activity.serverName)
                             .font(.headline)
-                        Text("\(activity.containerName) · :\(activity.webPort)")
+                        Text(activity.containerName + " · :" + String(activity.webPort))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }

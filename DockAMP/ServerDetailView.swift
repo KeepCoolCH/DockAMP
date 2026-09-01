@@ -28,8 +28,8 @@ struct ServerDetailView: View {
             Divider()
             
             Picker("View", selection: $selectedTab) {
-                ForEach(DetailTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
+                ForEach(availableTabs, id: \.self) { tab in
+                    Text(tabTitle(tab)).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -40,7 +40,11 @@ struct ServerDetailView: View {
                 case .overview:
                     OverviewTabView(viewModel: viewModel)
                 case .webserver:
-                    WebServerConfigView(viewModel: viewModel)
+                    if viewModel.configuration.serverType == .php {
+                        WebServerConfigView(viewModel: viewModel)
+                    } else {
+                        AppRuntimeConfigView(viewModel: viewModel)
+                    }
                 case .php:
                     PHPConfigView(viewModel: viewModel)
                 case .database:
@@ -66,6 +70,16 @@ struct ServerDetailView: View {
                 try? await Task.sleep(for: .seconds(5))
             }
         }
+    }
+
+    private var availableTabs: [DetailTab] {
+        viewModel.configuration.serverType == .php
+            ? DetailTab.allCases
+            : [.overview, .webserver, .database, .logs]
+    }
+
+    private func tabTitle(_ tab: DetailTab) -> String {
+        tab == .webserver && viewModel.configuration.serverType.isAppServer ? "Runtime" : tab.rawValue
     }
 }
 
@@ -177,7 +191,7 @@ struct ServerControlsView: View {
                         await viewModel.resetWebStack()
                     }
                 } label: {
-                    Label("Reset Web/PHP", systemImage: "arrow.triangle.2.circlepath")
+                    Label(viewModel.configuration.serverType == .php ? "Reset Web/PHP" : "Reset App", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .disabled(viewModel.isResettingWebStack)
 
@@ -214,17 +228,20 @@ struct OverviewTabView: View {
                         .disabled(draftServerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
 
-                    if viewModel.isRunning {
-                        Text("⚠️ Renamed servers may require restart/rebuild for running containers.")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
                 }
                 .padding(8)
             }
             .padding(.horizontal)
 
             HStack(spacing: 16) {
+                if viewModel.configuration.serverType.isAppServer {
+                    ContainerStatusCard(
+                        title: viewModel.configuration.serverType.rawValue,
+                        type: runtimeVersionLabel,
+                        status: viewModel.webStatus,
+                        icon: viewModel.configuration.serverType == .python ? "chevron.left.forwardslash.chevron.right" : "shippingbox"
+                    )
+                } else {
                 ContainerStatusCard(
                     title: "Web Server",
                     type: viewModel.configuration.webServerType.rawValue,
@@ -238,6 +255,7 @@ struct OverviewTabView: View {
                     status: viewModel.phpStatus,
                     icon: "chevron.left.forwardslash.chevron.right"
                 )
+                }
                 
                 ContainerStatusCard(
                     title: "Database",
@@ -247,7 +265,7 @@ struct OverviewTabView: View {
                 )
             }
             .padding(.horizontal)
-            
+
             GroupBox("Quick Overview") {
                 VStack(spacing: 12) {
                     InfoRow(label: "Server Name", value: viewModel.configuration.name)
@@ -257,6 +275,8 @@ struct OverviewTabView: View {
                     InfoRow(label: "Database Port", value: databasePortLabel)
                     Divider()
                     InfoRow(label: "Document Root", value: viewModel.configuration.webServerDocumentRoot)
+                    Divider()
+                    InfoRow(label: "NPM Proxy Host", value: npmProxyOverviewLabel)
                 }
                 .padding(8)
             }
@@ -282,6 +302,34 @@ struct OverviewTabView: View {
         case .dedicated:
             return "\(viewModel.configuration.databaseType.rawValue) (dedicated)"
         }
+    }
+
+    private var runtimeVersionLabel: String {
+        switch viewModel.configuration.serverType {
+        case .php: return "PHP \(viewModel.configuration.phpVersion)"
+        case .python: return "Python \(viewModel.configuration.pythonSettings.version) · \(viewModel.configuration.pythonSettings.framework.displayName)"
+        case .node: return "Node.js \(viewModel.configuration.nodeSettings.version) · \(viewModel.configuration.nodeSettings.framework.displayName)"
+        }
+    }
+
+    private var npmProxyOverviewLabel: String {
+        let status: String
+        switch viewModel.configuration.npmProxyStatus {
+        case "ssl": status = "HTTPS"
+        case "http": status = "HTTP"
+        case "disabled": status = "Disabled"
+        case "error": status = "Error"
+        default: status = viewModel.configuration.npmProxyEnabled ? "Not created" : "Disabled"
+        }
+
+        var parts = [viewModel.configuration.name, status]
+        if let hostID = viewModel.configuration.npmProxyHostID {
+            parts.append("ID \(hostID)")
+        }
+        if !viewModel.configuration.npmProxyError.isEmpty {
+            parts.append(viewModel.configuration.npmProxyError)
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var databasePortLabel: String {

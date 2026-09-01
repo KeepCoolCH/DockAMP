@@ -219,8 +219,12 @@ class DockerManager: ObservableObject {
         var roles: [String: String] = [:]
 
         for config in ConfigurationStore.shared.configurations {
-            roles[config.webContainerName] = "\(config.name) · Web"
-            roles[config.phpContainerName] = "\(config.name) · PHP"
+            if config.serverType == .php {
+                roles[config.webContainerName] = "\(config.name) · Web"
+                roles[config.phpContainerName] = "\(config.name) · PHP"
+            } else {
+                roles[config.primaryContainerName] = "\(config.name) · \(config.serverType.rawValue)"
+            }
             switch config.databaseAttachmentMode {
             case .none:
                 break
@@ -837,8 +841,13 @@ class DockerManager: ObservableObject {
     }
     
     // MARK: - Container Management
+
+    func initializeDefaultProjectFiles(for config: ServerConfiguration) throws {
+        try ensureDefaultProjectFiles(for: config)
+    }
     
     func startStack(config: ServerConfiguration) async throws {
+        try ensureDefaultProjectFiles(for: config)
         try await createNetwork(config)
         
         switch config.databaseAttachmentMode {
@@ -854,15 +863,40 @@ class DockerManager: ObservableObject {
             try await startDedicatedDatabaseContainer(config)
         }
         
-        try await startPHPContainer(config)
-        try await waitForContainerRunning(config.phpContainerName)
-        try await Task.sleep(for: .milliseconds(500))
-        
-        try await startWebServerContainer(config)
+        if config.serverType == .php {
+            try await startPHPContainer(config)
+            try await waitForContainerRunning(config.phpContainerName)
+            try await Task.sleep(for: .milliseconds(500))
+            try await startWebServerContainer(config)
+        } else {
+            try await startAppContainer(config)
+        }
+
+        await syncNPMProxyHostAfterStart(config)
+    }
+
+    private func syncNPMProxyHostAfterStart(_ config: ServerConfiguration) async {
+        guard config.npmProxyEnabled else { return }
+        var updated = config
+        do {
+            let result = try await NPMProxyService.shared.syncProxyHost(
+                for: config,
+                settings: ProxyManagerStore.shared.settings
+            )
+            updated.npmProxyHostID = result.hostID
+            updated.npmProxyStatus = result.status
+            updated.npmProxyError = result.certificateError
+        } catch {
+            updated.npmProxyStatus = "error"
+            updated.npmProxyError = error.localizedDescription
+        }
+        ConfigurationStore.shared.updateConfiguration(updated)
     }
     
     func stopStack(config: ServerConfiguration) async throws {
-        var containers = [config.webContainerName, config.phpContainerName]
+        var containers = config.serverType == .php
+            ? [config.webContainerName, config.phpContainerName]
+            : [config.primaryContainerName]
         if config.databaseAttachmentMode == .dedicated {
             containers.append(config.dbContainerName)
         }
@@ -926,7 +960,7 @@ class DockerManager: ObservableObject {
     func removeStack(config: ServerConfiguration) async throws {
         try? await stopStack(config: config)
         
-        let containers = [config.webContainerName, config.phpContainerName, config.dbContainerName]
+        let containers = [config.webContainerName, config.phpContainerName, config.pythonContainerName, config.nodeContainerName, config.dbContainerName]
         for container in containers {
             _ = try? await executeCommand("docker", arguments: ["rm", "-f", container])
         }
@@ -938,7 +972,21 @@ class DockerManager: ObservableObject {
         }
         
         _ = try? await executeCommand("docker", arguments: ["volume", "rm", "-f", config.dbDataVolumeName])
+        if config.serverType == .node {
+            _ = try? await executeCommand("docker", arguments: ["volume", "rm", "-f", nodeModulesVolumeName(for: config)])
+        }
         await removeServerNetworkIfPossible(config.networkName)
+        removeRuntimeDirectory(for: config.id)
+    }
+
+    private func removeRuntimeDirectory(for serverID: UUID) {
+        let fileManager = FileManager.default
+        guard let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let directory = documents
+            .appendingPathComponent("DockAMP", isDirectory: true)
+            .appendingPathComponent("runtime", isDirectory: true)
+            .appendingPathComponent(serverID.uuidString, isDirectory: true)
+        try? fileManager.removeItem(at: directory)
     }
 
     private func removeServerNetworkIfPossible(_ networkName: String) async {
@@ -966,7 +1014,9 @@ class DockerManager: ObservableObject {
     }
     
     func restartStack(config: ServerConfiguration) async throws {
-        var containers = [config.webContainerName, config.phpContainerName]
+        var containers = config.serverType == .php
+            ? [config.webContainerName, config.phpContainerName]
+            : [config.primaryContainerName]
         if config.databaseAttachmentMode == .dedicated {
             containers.append(config.dbContainerName)
         }
@@ -977,6 +1027,12 @@ class DockerManager: ObservableObject {
     }
 
     func resetWebAndPHPContainers(config: ServerConfiguration) async throws {
+        if config.serverType.isAppServer {
+            _ = try? await executeCommand("docker", arguments: ["rm", "-f", config.primaryContainerName])
+            try await createNetwork(config)
+            try await startAppContainer(config)
+            return
+        }
         _ = try? await executeCommand("docker", arguments: ["stop", config.webContainerName, config.phpContainerName])
         _ = try? await executeCommand("docker", arguments: ["rm", "-f", config.webContainerName, config.phpContainerName])
 
@@ -1016,8 +1072,7 @@ class DockerManager: ObservableObject {
     }
     
     func getStackStatus(config: ServerConfiguration) async -> (web: ContainerStatus, php: ContainerStatus, db: ContainerStatus) {
-        async let webStatus = getContainerStatus(config.webContainerName)
-        async let phpStatus = getContainerStatus(config.phpContainerName)
+        async let webStatus = getContainerStatus(config.primaryContainerName)
         let dbStatus: ContainerStatus
         switch config.databaseAttachmentMode {
         case .none:
@@ -1028,16 +1083,22 @@ class DockerManager: ObservableObject {
             dbStatus = await getContainerStatus(config.dbContainerName)
         }
 
-        return await (webStatus, phpStatus, dbStatus)
+        let resolvedWebStatus = await webStatus
+        let resolvedPHPStatus = config.serverType == .php
+            ? await getContainerStatus(config.phpContainerName)
+            : resolvedWebStatus
+        return (resolvedWebStatus, resolvedPHPStatus, dbStatus)
     }
     
     // MARK: - Image Management
     
     func updateImages(config: ServerConfiguration) async throws {
-        var images = [
-            "\(config.webServerType.dockerImage):latest",
-            config.phpDockerImage
-        ]
+        var images: [String]
+        switch config.serverType {
+        case .php: images = ["\(config.webServerType.dockerImage):latest", config.phpDockerImage]
+        case .python: images = ["python:\(config.pythonSettings.version)-slim"]
+        case .node: images = ["node:\(config.nodeSettings.version)-slim"]
+        }
 
         switch config.databaseAttachmentMode {
         case .none:
@@ -1179,7 +1240,12 @@ class DockerManager: ObservableObject {
                 normalizedPath
             ])
         } else {
-            let image = "\(config.webServerType.dockerImage):latest"
+            let image: String
+            switch config.serverType {
+            case .php: image = "\(config.webServerType.dockerImage):latest"
+            case .python: image = "python:\(config.pythonSettings.version)-slim"
+            case .node: image = "node:\(config.nodeSettings.version)-slim"
+            }
             output = try await executeCommand("docker", arguments: [
                 "run",
                 "--rm",
@@ -1231,10 +1297,17 @@ class DockerManager: ObservableObject {
         }
 
         for config in ConfigurationStore.shared.configurations {
-            add("\(config.webServerType.dockerImage):latest", label: "\(config.webServerType.rawValue) Web Server", usedBy: config.name)
-            add(config.phpDockerImage, label: "PHP \(config.phpVersion)", usedBy: config.name)
+            switch config.serverType {
+            case .php:
+                add("\(config.webServerType.dockerImage):latest", label: "\(config.webServerType.rawValue) Web Server", usedBy: config.name)
+                add(config.phpDockerImage, label: "PHP \(config.phpVersion)", usedBy: config.name)
+            case .python:
+                add("python:\(config.pythonSettings.version)-slim", label: "Python \(config.pythonSettings.version)", usedBy: config.name)
+            case .node:
+                add("node:\(config.nodeSettings.version)-slim", label: "Node.js \(config.nodeSettings.version)", usedBy: config.name)
+            }
 
-            if requiresCustomPHPRuntimeImage(settings: config.phpSettings) {
+            if config.serverType == .php && requiresCustomPHPRuntimeImage(settings: config.phpSettings) {
                 let signature = phpRuntimeSignature(baseImage: config.phpDockerImage, settings: config.phpSettings)
                 add("dockamp-php-runtime:\(signature)", label: "DockAMP PHP Runtime", usedBy: config.name)
             }
@@ -1290,30 +1363,50 @@ class DockerManager: ObservableObject {
     }
 
     func liveVisitorActivity(for configs: [ServerConfiguration]) async throws -> [LiveVisitorServerActivity] {
-        var activities: [LiveVisitorServerActivity] = []
+        await withTaskGroup(of: LiveVisitorServerActivity?.self) { group in
+            for config in configs {
+                group.addTask { await self.liveVisitorActivity(for: config) }
+            }
 
-        for config in configs {
-            let containerName = config.webContainerName
-            let status = await getContainerStatus(containerName)
-            guard status == .running else { continue }
-
-            let logs = (try? await getContainerLogs(containerName, tail: 300)) ?? ""
-            let rate = await containerNetworkRate(containerName)
-            let visitors = activeVisitors(from: logs)
-
-            activities.append(LiveVisitorServerActivity(
-                id: config.id,
-                serverName: config.name,
-                webPort: config.webServerPort,
-                containerName: containerName,
-                status: status,
-                rxRate: rate.rx,
-                txRate: rate.tx,
-                activeVisitors: visitors
-            ))
+            var activities: [LiveVisitorServerActivity] = []
+            for await activity in group {
+                if let activity { activities.append(activity) }
+            }
+            return sortedLiveVisitorActivities(activities)
         }
+    }
 
-        return activities.sorted {
+    func liveVisitorActivity(
+        for config: ServerConfiguration,
+        includeNetworkRate: Bool = true
+    ) async -> LiveVisitorServerActivity? {
+        let containerName = config.primaryContainerName
+        let status = await getContainerStatus(containerName)
+        guard status == .running else { return nil }
+
+        let logs = (try? await getContainerLogs(containerName, tail: 300)) ?? ""
+        let rate = includeNetworkRate
+            ? await containerNetworkRate(containerName)
+            : (rx: "0 B/s", tx: "0 B/s")
+
+        return LiveVisitorServerActivity(
+            id: config.id,
+            serverName: config.name,
+            webPort: config.webServerPort,
+            containerName: containerName,
+            status: status,
+            rxRate: rate.rx,
+            txRate: rate.tx,
+            activeVisitors: activeVisitors(from: logs)
+        )
+    }
+
+    func liveVisitorNetworkRate(for config: ServerConfiguration) async -> (rx: String, tx: String) {
+        await containerNetworkRate(config.primaryContainerName)
+    }
+
+    private func sortedLiveVisitorActivities(_ activities: [LiveVisitorServerActivity]) -> [LiveVisitorServerActivity] {
+        activities.sorted {
             if $0.activeVisitors.count != $1.activeVisitors.count {
                 return $0.activeVisitors.count > $1.activeVisitors.count
             }
@@ -1491,8 +1584,10 @@ class DockerManager: ObservableObject {
     }
 
     func renameStackContainers(oldConfig: ServerConfiguration, newConfig: ServerConfiguration) async throws {
-        try await renameContainerIfExists(from: oldConfig.webContainerName, to: newConfig.webContainerName)
-        try await renameContainerIfExists(from: oldConfig.phpContainerName, to: newConfig.phpContainerName)
+        try await renameContainerIfExists(from: oldConfig.primaryContainerName, to: newConfig.primaryContainerName)
+        if oldConfig.serverType == .php || newConfig.serverType == .php {
+            try await renameContainerIfExists(from: oldConfig.phpContainerName, to: newConfig.phpContainerName)
+        }
 
         if oldConfig.databaseAttachmentMode == .dedicated || newConfig.databaseAttachmentMode == .dedicated {
             try await renameContainerIfExists(from: oldConfig.dbContainerName, to: newConfig.dbContainerName)
@@ -2019,6 +2114,136 @@ class DockerManager: ObservableObject {
         value.replacingOccurrences(of: "\"", with: "\"\"")
     }
     
+    private func startAppContainer(_ config: ServerConfiguration) async throws {
+        var args = [
+            "run", "-d",
+            "--name", config.primaryContainerName,
+            "--network", config.networkName,
+            "-p", "\(config.webServerPort):\(appContainerPort(for: config))",
+            "-e", "PORT=\(appContainerPort(for: config))",
+            "-v", "\(config.webServerDocumentRoot):/app",
+            "-w", "/app"
+        ]
+        appendRestartPolicyIfNeeded(for: config, to: &args)
+        appendResourceArgs(cpus: config.webServerCPUs, memory: config.webServerMemoryLimit, to: &args)
+        args += parseAdditionalDockerRunArgs(config.webServerAdditionalRunArgs)
+        args += parseAdditionalContainerMountArgs(config.additionalContainerMounts)
+
+        let image: String
+        let command: String
+        switch config.serverType {
+        case .php:
+            return
+        case .python:
+            image = "python:\(config.pythonSettings.version)-slim"
+            let managedRequirements = config.pythonSettings.requirements.trimmingCharacters(in: .whitespacesAndNewlines)
+            if managedRequirements.isEmpty {
+                command = "if [ -f requirements.txt ]; then python -m pip install --disable-pip-version-check -r requirements.txt; fi; \(config.pythonSettings.startCommand)"
+            } else {
+                let requirementsURL = try writeManagedPythonRequirements(for: config)
+                args += ["-v", "\(requirementsURL.path):/dockamp-requirements.txt:ro"]
+                command = "python -m pip install --disable-pip-version-check -r /dockamp-requirements.txt; \(config.pythonSettings.startCommand)"
+            }
+        case .node:
+            image = "node:\(config.nodeSettings.version)-slim"
+            if config.nodeSettings.useNodeModulesVolume {
+                args += ["-v", "\(nodeModulesVolumeName(for: config)):/app/node_modules"]
+            }
+            let install = config.nodeSettings.installCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+            command = (install.isEmpty ? "" : install + " && ") + config.nodeSettings.startCommand
+        }
+
+        args += [image, "sh", "-lc", command]
+        _ = try? await executeCommand("docker", arguments: ["rm", "-f", config.primaryContainerName])
+        try await runContainerWithNetworkRecovery(networkName: config.networkName, arguments: args)
+    }
+
+    private func appContainerPort(for config: ServerConfiguration) -> Int {
+        config.serverType == .python ? config.pythonSettings.containerPort : config.nodeSettings.containerPort
+    }
+
+    private func nodeModulesVolumeName(for config: ServerConfiguration) -> String {
+        "dockamp_node_modules_\(config.id.uuidString.lowercased())"
+    }
+
+    private func writeManagedPythonRequirements(for config: ServerConfiguration) throws -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let directory = documents
+            .appendingPathComponent("DockAMP", isDirectory: true)
+            .appendingPathComponent("runtime", isDirectory: true)
+            .appendingPathComponent(config.id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("requirements.txt")
+        let content = config.pythonSettings.requirements.trimmingCharacters(in: .whitespacesAndNewlines)
+        try (content + "\n").write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func ensureDefaultProjectFiles(for config: ServerConfiguration) throws {
+        let root = URL(fileURLWithPath: config.webServerDocumentRoot, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let contents = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        let ignoredSeedFiles = Set([".DS_Store", "Thumbs.db"])
+        let wasEmpty = contents.allSatisfy { ignoredSeedFiles.contains($0.lastPathComponent) }
+
+        guard wasEmpty else { return }
+
+        switch config.serverType {
+        case .php:
+            try Self.defaultSiteIndex.write(to: root.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+        case .python:
+            try Self.defaultPythonApp.write(to: root.appendingPathComponent("app.py"), atomically: true, encoding: .utf8)
+        case .node:
+            try Self.defaultNodeServer.write(to: root.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
+            try Self.defaultNodePackage.write(to: root.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+        }
+    }
+
+    private static let defaultSiteIndex = """
+    <!doctype html>
+    <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DockAMP Web Server</title>
+    <style>body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #061120; color: #e7f2ff; } main { max-width: 720px; padding: 48px; } small { color: #f6b73c; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; } h1 { margin: 12px 0; font-size: clamp(32px, 6vw, 64px); line-height: 1; } p { color: #a9c4dd; font-size: 18px; line-height: 1.6; } code { color: #7dd3fc; }</style></head>
+    <body><main><small>DockAMP Web/PHP</small><h1>Your web server is running.</h1><p>Edit <code>index.html</code> in the Website filebrowser or upload your own project files.</p></main></body></html>
+    """
+
+    private static let defaultPythonApp = #"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import os
+
+    class App(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DockAMP Python App</title><style>body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #061120; color: #e7f2ff; }} main {{ max-width: 720px; padding: 48px; }} small {{ color: #f6b73c; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }} h1 {{ margin: 12px 0; font-size: clamp(32px, 6vw, 64px); line-height: 1; }} p {{ color: #a9c4dd; font-size: 18px; line-height: 1.6; }} code {{ color: #7dd3fc; }}</style></head><body><main><small>DockAMP Python</small><h1>Your Python app is running.</h1><p>Edit <code>app.py</code> in the App filebrowser or upload your own project files.</p></main></body></html>""".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    if __name__ == "__main__":
+        port = int(os.environ.get("PORT", "8000"))
+        ThreadingHTTPServer(("0.0.0.0", port), App).serve_forever()
+    """#
+
+    private static let defaultNodeServer = #"""
+    const http = require("http");
+    const port = Number(process.env.PORT || 3000);
+    const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DockAMP Node.js App</title><style>body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #061120; color: #e7f2ff; } main { max-width: 720px; padding: 48px; } small { color: #f6b73c; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; } h1 { margin: 12px 0; font-size: clamp(32px, 6vw, 64px); line-height: 1; } p { color: #a9c4dd; font-size: 18px; line-height: 1.6; } code { color: #7dd3fc; }</style></head><body><main><small>DockAMP Node.js</small><h1>Your Node.js app is running.</h1><p>Edit <code>server.js</code> in the App filebrowser or upload your own project files.</p></main></body></html>`;
+    http.createServer((req, res) => { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(page); }).listen(port, "0.0.0.0", () => { console.log(`DockAMP Node.js app listening on ${port}`); });
+    """#
+
+    private static let defaultNodePackage = """
+    {
+      "name": "dockamp-node-app",
+      "version": "1.0.0",
+      "private": true,
+      "scripts": {
+        "start": "node server.js",
+        "dev": "node server.js"
+      },
+      "dependencies": {}
+    }
+    """
+
     private func startPHPContainer(_ config: ServerConfiguration) async throws {
         let phpIniPath = try createPHPConfig(config)
         let phpFpmPath = try createPHPFPMConfig(config)
@@ -2126,8 +2351,9 @@ class DockerManager: ObservableObject {
         \(additionalIni)
         """
         
-        let phpIniURL = try writeTransientConfigFile(
-            named: "php_\(config.id).ini",
+        let phpIniURL = try writeRuntimeConfigFile(
+            serverID: config.id,
+            named: "php.ini",
             contents: phpIni
         )
         return phpIniURL.path
@@ -2147,45 +2373,25 @@ class DockerManager: ObservableObject {
         pm.max_requests = \(config.phpSettings.fpmMaxRequests)
         catch_workers_output = yes
         """
-        let fpmConfURL = try writeTransientConfigFile(
-            named: "php_fpm_\(config.id).conf",
+        let fpmConfURL = try writeRuntimeConfigFile(
+            serverID: config.id,
+            named: "php-fpm.conf",
             contents: fpmConfig
         )
         return fpmConfURL.path
     }
 
-    private func writeTransientConfigFile(named fileName: String, contents: String) throws -> URL {
+    private func writeRuntimeConfigFile(serverID: UUID, named fileName: String, contents: String) throws -> URL {
         let fileManager = FileManager.default
-        let candidateDirectories = [
-            fileManager.temporaryDirectory,
-            try dockampApplicationSupportTempDirectory()
-        ]
-
-        var lastError: Error?
-        for directory in candidateDirectories {
-            do {
-                try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-                let fileURL = directory.appendingPathComponent(fileName)
-                try contents.write(to: fileURL, atomically: true, encoding: .utf8)
-                return fileURL
-            } catch {
-                lastError = error
-            }
-        }
-
-        throw lastError ?? DockerError.commandFailed("Unable to write temporary config file '\(fileName)'.")
-    }
-
-    private func dockampApplicationSupportTempDirectory() throws -> URL {
-        let appSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return appSupport
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let directory = documents
             .appendingPathComponent("DockAMP", isDirectory: true)
-            .appendingPathComponent("tmp", isDirectory: true)
+            .appendingPathComponent("runtime", isDirectory: true)
+            .appendingPathComponent(serverID.uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent(fileName)
+        try contents.write(to: fileURL, atomically: true, encoding: .utf8)
+        return fileURL
     }
 
     private func createNginxConfig(_ config: ServerConfiguration) throws -> String {
@@ -2249,8 +2455,9 @@ class DockerManager: ObservableObject {
         }
         """
 
-        let nginxConfURL = try writeTransientConfigFile(
-            named: "nginx_\(config.id).conf",
+        let nginxConfURL = try writeRuntimeConfigFile(
+            serverID: config.id,
+            named: "nginx.conf",
             contents: nginxConf
         )
         return nginxConfURL.path
@@ -2291,8 +2498,9 @@ class DockerManager: ObservableObject {
         }
         """
 
-        let nginxMainConfURL = try writeTransientConfigFile(
-            named: "nginx_main_\(config.id).conf",
+        let nginxMainConfURL = try writeRuntimeConfigFile(
+            serverID: config.id,
+            named: "nginx-main.conf",
             contents: nginxMainConf
         )
         return nginxMainConfURL.path

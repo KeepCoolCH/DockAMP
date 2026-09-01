@@ -27,7 +27,7 @@ struct WebServerConfigView: View {
             
             Section("Port Configuration") {
                 HStack {
-                    TextField("Port", value: $viewModel.configuration.webServerPort, format: .number.grouping(.never))
+                    TextField("", value: $viewModel.configuration.webServerPort, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder)
                     
                     Text("Default: 8081")
@@ -39,6 +39,8 @@ struct WebServerConfigView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            NPMProxyHostSettingsSection(viewModel: viewModel)
 
             Section("Container Resources (Web Server)") {
                 LabeledContent("CPU Cores (--cpus)") {

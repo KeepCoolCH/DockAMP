@@ -4,11 +4,15 @@ struct ProxyManagerConfigView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var store = ProxyManagerStore.shared
     @StateObject private var dockerManager = DockerManager.shared
+    @StateObject private var configStore = ConfigurationStore.shared
 
     @State private var status: ContainerStatus = .notCreated
     @State private var isBusy = false
     @State private var errorMessage: String?
     @State private var showError = false
+    @State private var npmHosts: [NPMProxyHost] = []
+    @State private var selectedNPMHostIDs = Set<Int>()
+    @State private var npmMessage: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,8 +82,32 @@ struct ProxyManagerConfigView: View {
                         }
                     }
 
+                    LabeledContent("NPM Administrator Email") {
+                        TextField("", text: $store.settings.adminEmail)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 240)
+                    }
+
+                    LabeledContent("NPM Administrator Password") {
+                        HoldToRevealPasswordField(
+                            placeholder: "",
+                            text: $store.settings.adminPassword
+                        )
+                            .frame(width: 240)
+                    }
+
+                    HStack {
+                        Button("Test Connection") {
+                            Task { await testNPMConnection() }
+                        }
+                        Button("Load Existing Hosts") {
+                            Task { await loadNPMHosts() }
+                        }
+                        .disabled(isBusy)
+                    }
+
                     LabeledContent("Admin Port") {
-                        TextField("Admin", value: $store.settings.adminPort, format: .number.grouping(.never))
+                        TextField("", value: $store.settings.adminPort, format: .number.grouping(.never))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 120)
                     }
@@ -96,13 +124,13 @@ struct ProxyManagerConfigView: View {
                         Toggle("Auto-Start with App", isOn: $store.settings.autoStartOnAppLaunch)
 
                         LabeledContent("HTTP Port") {
-                            TextField("HTTP", value: $store.settings.httpPort, format: .number.grouping(.never))
+                            TextField("", value: $store.settings.httpPort, format: .number.grouping(.never))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 120)
                         }
 
                         LabeledContent("HTTPS Port") {
-                            TextField("HTTPS", value: $store.settings.httpsPort, format: .number.grouping(.never))
+                            TextField("", value: $store.settings.httpsPort, format: .number.grouping(.never))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 120)
                         }
@@ -154,6 +182,40 @@ struct ProxyManagerConfigView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 180)
                         }
+                    }
+                }
+
+                Section("Existing NPM Proxy Hosts") {
+                    if npmHosts.isEmpty {
+                        Text("Load existing hosts to adopt matching domains into DockAMP servers.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(npmHosts) { host in
+                            Toggle(isOn: selectionBinding(for: host.id)) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(host.displayName.isEmpty ? "Host ID \(host.id)" : host.displayName)
+                                        Text("\(host.forwardHost):\(host.forwardPort) · \(host.usesSSL ? "HTTPS" : "HTTP") · ID \(host.id)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+
+                        Button("Adopt Selected Hosts") {
+                            adoptSelectedHosts()
+                        }
+                        .disabled(selectedNPMHostIDs.isEmpty)
+                    }
+
+                    if let npmMessage {
+                        Text(npmMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -217,6 +279,73 @@ struct ProxyManagerConfigView: View {
             return
         }
         status = await dockerManager.getProxyManagerStatus()
+    }
+
+    private func testNPMConnection() async {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            store.save()
+            let count = try await NPMProxyService.shared.testConnection(settings: store.settings)
+            npmMessage = "NPM connection successful · \(count) Proxy Hosts"
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    private func loadNPMHosts() async {
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            store.save()
+            npmHosts = try await NPMProxyService.shared.proxyHosts(settings: store.settings)
+            selectedNPMHostIDs = Set(npmHosts.filter { host in
+                configStore.configurations.contains { $0.npmProxyHostID == host.id }
+            }.map(\.id))
+            npmMessage = "Loaded \(npmHosts.count) Proxy Hosts"
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    private func selectionBinding(for id: Int) -> Binding<Bool> {
+        Binding(
+            get: { selectedNPMHostIDs.contains(id) },
+            set: { selected in
+                if selected { selectedNPMHostIDs.insert(id) } else { selectedNPMHostIDs.remove(id) }
+            }
+        )
+    }
+
+    private func adoptSelectedHosts() {
+        var adopted = 0
+        var unmatched: [String] = []
+        for host in npmHosts where selectedNPMHostIDs.contains(host.id) {
+            let domains = Set(host.domainNames.map { $0.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) })
+            let matches = configStore.configurations.filter {
+                domains.contains($0.name.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")))
+            }
+            guard matches.count == 1, var config = matches.first else {
+                unmatched.append(host.displayName.isEmpty ? "ID \(host.id)" : host.displayName)
+                continue
+            }
+            guard (config.npmProxyHostID == nil || config.npmProxyHostID == host.id),
+                  !configStore.configurations.contains(where: { $0.id != config.id && $0.npmProxyHostID == host.id }) else {
+                unmatched.append(host.displayName.isEmpty ? "ID \(host.id)" : host.displayName)
+                continue
+            }
+            config.npmProxyEnabled = true
+            config.npmProxyHostID = host.id
+            config.npmProxyStatus = host.usesSSL ? "ssl" : "http"
+            config.npmProxyError = ""
+            configStore.updateConfiguration(config)
+            adopted += 1
+        }
+        npmMessage = unmatched.isEmpty
+            ? "Adopted \(adopted) Proxy Hosts"
+            : "Adopted \(adopted). No unique DockAMP server match: \(unmatched.joined(separator: ", "))"
     }
 
     private var defaultAdminHost: String {

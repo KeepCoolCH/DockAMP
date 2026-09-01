@@ -14,6 +14,7 @@ class ServerViewModel: ObservableObject {
     @Published var isUpdating = false
     @Published var isResettingWebStack = false
     @Published var isFixingPermissions = false
+    @Published var isProxySyncing = false
     
     @Published var errorMessage: String?
     @Published var showError = false
@@ -229,14 +230,19 @@ class ServerViewModel: ObservableObject {
             config.name = lastContainerBaseName
             return config
         }()
+        let nameChanged = renameSourceConfig.name != updatedConfig.name
+        let wasRunning = isRunning
 
         do {
-            if renameSourceConfig.name != updatedConfig.name {
+            if nameChanged {
                 try await dockerManager.renameStackContainers(oldConfig: renameSourceConfig, newConfig: updatedConfig)
             }
             configuration = updatedConfig
             configStore.updateConfiguration(updatedConfig)
             lastContainerBaseName = updatedConfig.name
+            if nameChanged && wasRunning {
+                await restartServer()
+            }
         } catch {
             errorMessage = error.localizedDescription
             showError = true
@@ -256,6 +262,58 @@ class ServerViewModel: ObservableObject {
         }
 
         isFixingPermissions = false
+    }
+
+    func syncNPMProxyHost() async {
+        guard !isProxySyncing else { return }
+        isProxySyncing = true
+        defer { isProxySyncing = false }
+        do {
+            if !configuration.npmProxyEnabled {
+                if let hostID = configuration.npmProxyHostID {
+                    try await NPMProxyService.shared.deleteManagedHost(id: hostID, settings: ProxyManagerStore.shared.settings)
+                }
+                configuration.npmProxyHostID = nil
+                configuration.npmProxyStatus = "disabled"
+                configuration.npmProxyError = ""
+                configStore.updateConfiguration(configuration)
+                return
+            }
+            let result = try await NPMProxyService.shared.syncProxyHost(
+                for: configuration,
+                settings: ProxyManagerStore.shared.settings
+            )
+            configuration.npmProxyHostID = result.hostID
+            configuration.npmProxyStatus = result.status
+            configuration.npmProxyError = result.certificateError
+            configStore.updateConfiguration(configuration)
+        } catch {
+            configuration.npmProxyStatus = "error"
+            configuration.npmProxyError = error.localizedDescription
+            configStore.updateConfiguration(configuration)
+            errorMessage = error.localizedDescription
+            showError = true
+        }
+    }
+
+    func adoptExistingNPMProxyHost() async {
+        guard !isProxySyncing else { return }
+        isProxySyncing = true
+        defer { isProxySyncing = false }
+        do {
+            let result = try await NPMProxyService.shared.adoptExistingHost(
+                for: configuration,
+                settings: ProxyManagerStore.shared.settings
+            )
+            configuration.npmProxyEnabled = true
+            configuration.npmProxyHostID = result.hostID
+            configuration.npmProxyStatus = result.status
+            configuration.npmProxyError = ""
+            configStore.updateConfiguration(configuration)
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
+        }
     }
     
     func openInBrowser() {

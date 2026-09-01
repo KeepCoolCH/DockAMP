@@ -14,7 +14,7 @@ struct LogsTabView: View {
         func containerName(for config: ServerConfiguration) -> String {
             switch self {
             case .web:
-                return config.webContainerName
+                return config.primaryContainerName
             case .php:
                 return config.phpContainerName
             case .database:
@@ -34,8 +34,8 @@ struct LogsTabView: View {
         VStack(spacing: 0) {
             HStack {
                 Picker("Container", selection: $selectedContainer) {
-                    ForEach(LogContainer.allCases, id: \.self) { container in
-                        Text(container.rawValue).tag(container)
+                    ForEach(availableContainers, id: \.self) { container in
+                        Text(container == .web && viewModel.configuration.serverType.isAppServer ? viewModel.configuration.serverType.rawValue : container.rawValue).tag(container)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -112,6 +112,13 @@ struct LogsTabView: View {
                 try? await Task.sleep(for: .seconds(3))
             }
         }
+    }
+
+    private var availableContainers: [LogContainer] {
+        var result: [LogContainer] = [.web]
+        if viewModel.configuration.serverType == .php { result.append(.php) }
+        if viewModel.configuration.databaseAttachmentMode != .none { result.append(.database) }
+        return result
     }
     
     private func loadLogs() {

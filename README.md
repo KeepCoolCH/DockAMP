@@ -3,7 +3,7 @@
 # 🐳 DockAMP Docker image or separate macOS app
 
 **DockAMP** is a Docker image with a responsive web interface to manage official Apache/Nginx, PHP, Python, Node.js, MySQL/MariaDB/PostgeSQL and proxy containers in Docker - also available as a macOS app.
-Docker version **1.3** | macOS version **1.2** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
+Docker version **1.3** | macOS version **1.3** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
 
 ---
 
@@ -13,7 +13,7 @@ Docker version **1.3** | macOS version **1.2** | developed by **Kevin Tobler** �
 
 🍎 The macOS version supports Docker Desktop and OrbStack (macOS 14.6 Sonoma or newer)
 
-[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.2)
+[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.3)
 
 ---
 
@@ -253,6 +253,10 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 
 #### Core
 - Apache or Nginx per server
+- Web/PHP, Python, or Node.js server types
+- Python `3.9`-`3.13` and Node.js `18`-`24` runtime selection with configurable internal port and start commands
+- Framework presets with automatic ports, commands, and dependency suggestions for FastAPI, Flask, Django, Streamlit, Gradio, Express, Fastify, Next.js, Vite, and Nuxt
+- Docker-version test-page templates are created automatically when a selected project folder is empty
 - Dynamic PHP version list from Docker Hub (with local fallback)
 - Database support: MySQL, MariaDB, PostgreSQL
 - Per-server start, stop, restart
@@ -279,6 +283,10 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Named volumes or host-path persistence
 - Internal or external Proxy Manager mode
 - External Proxy Manager admin host can be opened from DockAMP
+- Stored NPM administrator credentials with connection testing
+- Automatic creation and updating of per-server NPM Proxy Hosts
+- Existing NPM Proxy Hosts can be loaded, selected, and adopted without replacing certificates, Advanced Config, or Custom Locations
+- Public domains reuse or request Let's Encrypt certificates; local domains remain available over HTTP
 
 #### PHP / Web stack
 - Extensive PHP settings (performance, errors, sessions, OPcache, directives)
@@ -288,6 +296,12 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Additional bind mounts (with add/remove rows and read-only toggle)
 - Finder folder picker for document roots and additional host roots
 - Container path browser for additional mounts through a temporary helper container
+
+#### Python / Node.js apps
+- Dedicated Python and Node.js app containers with direct host-port publishing
+- Python requirements installation and editable runtime command
+- Node.js install/start commands with optional persistent `node_modules` volume
+- Runtime settings, app logs, database modes, auto-start, backups, image updates, and Recovery Compose Export
 
 #### Maintenance, images, and storage
 - Separate Image Update Center for DockAMP-managed Docker images
@@ -348,7 +362,7 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 
 ## 🔧 Installation
 
-[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.2)
+[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.3)
 
 1. Install Docker Desktop or OrbStack (OrbStack recommended for faster network speed).
 2. Open DockAMP.app

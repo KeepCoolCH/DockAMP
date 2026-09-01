@@ -26,12 +26,13 @@ struct ContentView: View {
                 Section("Servers") {
                     ForEach(configStore.configurations) { config in
                         ServerListItemView(configuration: config)
-                            .tag(config.id)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
-                            .onTapGesture {
-                                selectedConfigId = config.id
-                                configStore.selectedConfiguration = config
+                            .draggable(config.id.uuidString)
+                            .dropDestination(for: String.self) { items, _ in
+                                moveDraggedConfiguration(items, before: config.id)
                             }
+                            .tag(config.id)
                             .contextMenu {
                                 Button {
                                     duplicateConfiguration(config)
@@ -47,10 +48,21 @@ struct ContentView: View {
                             }
                     }
                     .onDelete(perform: deleteConfigurations)
+                    .onMove(perform: moveConfigurations)
                 }
             }
             .safeAreaInset(edge: .top) {
                 Color.clear.frame(height: 8)
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack {
+                    Text(appVersionLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
             .navigationTitle("DockAMP")
             .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 460)
@@ -215,6 +227,9 @@ struct ContentView: View {
                 selectedConfigId = selected.id
             }
         }
+        .onChange(of: selectedConfigId) { _, selectedID in
+            configStore.selectedConfiguration = configStore.configurations.first { $0.id == selectedID }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .dockAMPShowNewServerSheet)) { _ in
             showingNewServerSheet = true
         }
@@ -225,6 +240,34 @@ struct ContentView: View {
             let config = configStore.configurations[index]
             deleteConfiguration(config)
         }
+    }
+
+    private var appVersionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "V.\(version ?? "-")"
+    }
+
+    private func moveConfigurations(from source: IndexSet, to destination: Int) {
+        configStore.configurations.move(fromOffsets: source, toOffset: destination)
+        configStore.saveConfigurations()
+    }
+
+    private func moveDraggedConfiguration(_ items: [String], before targetID: UUID) -> Bool {
+        guard let rawID = items.first,
+              let draggedID = UUID(uuidString: rawID),
+              draggedID != targetID,
+              let sourceIndex = configStore.configurations.firstIndex(where: { $0.id == draggedID }) else {
+            return false
+        }
+
+        let movedConfiguration = configStore.configurations.remove(at: sourceIndex)
+        guard let targetIndex = configStore.configurations.firstIndex(where: { $0.id == targetID }) else {
+            configStore.configurations.insert(movedConfiguration, at: sourceIndex)
+            return false
+        }
+        configStore.configurations.insert(movedConfiguration, at: targetIndex)
+        configStore.saveConfigurations()
+        return true
     }
 
     private func deleteConfiguration(_ config: ServerConfiguration) {
@@ -430,11 +473,19 @@ struct ServerListItemView: View {
                 Text(configuration.name)
                     .font(.headline)
                 
-                Text(":\(String(configuration.webServerPort)) • \(configuration.webServerType.rawValue) • PHP \(configuration.phpVersion)")
+                Text(serverSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "line.3.horizontal")
+                .foregroundStyle(.tertiary)
+                .allowsHitTesting(false)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .task(id: statusTaskKey) {
             while !Task.isCancelled {
                 let stackStatus = await DockerManager.shared.getStackStatus(config: configuration)
@@ -444,9 +495,22 @@ struct ServerListItemView: View {
         }
     }
 
+    private var serverSummary: String {
+        switch configuration.serverType {
+        case .php:
+            return ":\(configuration.webServerPort) • \(configuration.webServerType.rawValue) • PHP \(configuration.phpVersion)"
+        case .python:
+            return ":\(configuration.webServerPort) • Python \(configuration.pythonSettings.version) • \(configuration.pythonSettings.framework.displayName)"
+        case .node:
+            return ":\(configuration.webServerPort) • Node.js \(configuration.nodeSettings.version) • \(configuration.nodeSettings.framework.displayName)"
+        }
+    }
+
     private var statusTaskKey: String {
         [
             configuration.id.uuidString,
+            configuration.serverType.rawValue,
+            configuration.primaryContainerName,
             configuration.webContainerName,
             configuration.phpContainerName,
             configuration.dbContainerName,

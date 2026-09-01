@@ -64,6 +64,7 @@ final class ComposeExportManager: ObservableObject {
         }
 
         for server in servers {
+            try writeManagedPythonRequirements(for: server)
             var serverCompose = ComposeDocument()
             if server.databaseAttachmentMode == .global {
                 addSharedDatabase(to: &serverCompose, settings: sharedDatabase)
@@ -94,8 +95,79 @@ final class ComposeExportManager: ObservableObject {
         return summary()
     }
 
+    private func writeManagedPythonRequirements(for config: ServerConfiguration) throws {
+        guard config.serverType == .python else { return }
+        let content = config.pythonSettings.requirements.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let directory = documents
+            .appendingPathComponent("DockAMP", isDirectory: true)
+            .appendingPathComponent("runtime", isDirectory: true)
+            .appendingPathComponent(config.id.uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try (content + "\n").write(to: directory.appendingPathComponent("requirements.txt"), atomically: true, encoding: .utf8)
+    }
+
     private func addServer(_ config: ServerConfiguration, to compose: inout ComposeDocument) {
         compose.networks[config.networkName] = ["name": config.networkName]
+
+        if config.serverType.isAppServer {
+            let isPython = config.serverType == .python
+            let image = isPython
+                ? "python:\(config.pythonSettings.version)-slim"
+                : "node:\(config.nodeSettings.version)-slim"
+            let containerPort = isPython
+                ? config.pythonSettings.containerPort
+                : config.nodeSettings.containerPort
+            let startCommand = isPython
+                ? config.pythonSettings.startCommand
+                : config.nodeSettings.startCommand
+            var volumes = ["\(config.webServerDocumentRoot):/app"]
+            volumes += additionalMounts(from: config.additionalContainerMounts)
+            let command: String
+            if isPython {
+                let managedRequirements = config.pythonSettings.requirements.trimmingCharacters(in: .whitespacesAndNewlines)
+                if managedRequirements.isEmpty {
+                    command = "if [ -f requirements.txt ]; then python -m pip install --disable-pip-version-check -r requirements.txt; fi; \(startCommand)"
+                } else {
+                    let requirementsPath = NSHomeDirectory() + "/Documents/DockAMP/runtime/\(config.id.uuidString)/requirements.txt"
+                    volumes.append("\(requirementsPath):/dockamp-requirements.txt:ro")
+                    command = "python -m pip install --disable-pip-version-check -r /dockamp-requirements.txt; \(startCommand)"
+                }
+            } else {
+                let installCommand = config.nodeSettings.installCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+                command = installCommand.isEmpty ? startCommand : "\(installCommand) && \(startCommand)"
+            }
+            if config.serverType == .node && config.nodeSettings.useNodeModulesVolume {
+                let volumeName = "dockamp_node_modules_\(config.id.uuidString.lowercased())"
+                compose.volumes[volumeName] = ["name": volumeName]
+                volumes.append("\(volumeName):/app/node_modules")
+            }
+            var app = service(
+                image: image,
+                containerName: config.primaryContainerName,
+                restart: config.autoStartOnAppLaunch,
+                ports: ["\(config.webServerPort):\(containerPort)"],
+                networks: [config.networkName],
+                volumes: volumes
+            )
+            app["working_dir"] = "/app"
+            app["environment"] = ["PORT": "\(containerPort)"]
+            app["command"] = ["sh", "-lc", command]
+            addResources(cpus: config.webServerCPUs, memory: config.webServerMemoryLimit, to: &app)
+            compose.services[config.primaryContainerName] = app
+
+            if config.databaseAttachmentMode == .dedicated {
+                compose.services[config.dbContainerName] = databaseService(
+                    name: config.dbContainerName, type: config.databaseType,
+                    settings: config.databaseSettings, port: config.databasePort,
+                    volumeName: config.dbDataVolumeName, network: config.networkName,
+                    restart: config.autoStartOnAppLaunch, cpus: config.dedicatedDatabaseCPUs,
+                    memory: config.dedicatedDatabaseMemoryLimit, compose: &compose
+                )
+            }
+            return
+        }
 
         let documentRootTarget = config.webServerType == .apache ? "/usr/local/apache2/htdocs" : "/var/www/html"
         var commonVolumes = ["\(config.webServerDocumentRoot):\(documentRootTarget)"]

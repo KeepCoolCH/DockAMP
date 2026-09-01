@@ -12,6 +12,7 @@ class ConfigurationStore: ObservableObject {
     private let serversDirectory: URL
     private let databasesDirectory: URL
     private let databaseConfigFileURL: URL
+    private let serverOrderFileURL: URL
     private let legacyCentralDatabaseConfigFileURL: URL
     private let legacySaveURL: URL
     private let legacyOldRootSaveURL: URL
@@ -23,6 +24,7 @@ class ConfigurationStore: ObservableObject {
         serversDirectory = appDirectory.appendingPathComponent("servers", isDirectory: true)
         databasesDirectory = appDirectory.appendingPathComponent("databases", isDirectory: true)
         databaseConfigFileURL = databasesDirectory.appendingPathComponent("global_database.json")
+        serverOrderFileURL = serversDirectory.appendingPathComponent("server_order.json")
         legacyCentralDatabaseConfigFileURL = databasesDirectory.appendingPathComponent("database_configurations.json")
         legacySaveURL = appDirectory.appendingPathComponent("dockamp_configurations.json")
         legacyOldRootSaveURL = documentsDirectory.appendingPathComponent("dockamp_configurations.json")
@@ -39,6 +41,7 @@ class ConfigurationStore: ObservableObject {
             selectedConfiguration = configurations.first
         }
 
+        removeOrphanedRuntimeDirectories()
         isReadyForAutomaticComposeExport = true
     }
 
@@ -51,6 +54,29 @@ class ConfigurationStore: ObservableObject {
             print("Error creating DockAMP folder structure: \(error)")
         }
     }
+
+    private func removeOrphanedRuntimeDirectories() {
+        let fileManager = FileManager.default
+        let runtimeDirectory = appDirectory.appendingPathComponent("runtime", isDirectory: true)
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: runtimeDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let activeServerIDs = Set(configurations.map { $0.id })
+        for entry in entries {
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            if entry.lastPathComponent == "config" {
+                try? fileManager.removeItem(at: entry)
+                continue
+            }
+            guard let serverID = UUID(uuidString: entry.lastPathComponent), !activeServerIDs.contains(serverID) else {
+                continue
+            }
+            try? fileManager.removeItem(at: entry)
+        }
+    }
     
     // MARK: - Persistence
     
@@ -59,6 +85,7 @@ class ConfigurationStore: ObservableObject {
             saveServerConfigurationFile(for: config)
         }
         saveDatabaseConfigurationsFile()
+        saveServerOrder()
         removeOrphanedConfigurationFiles()
         if updateComposeExport && isReadyForAutomaticComposeExport {
             _ = try? ComposeExportManager.shared.exportNow()
@@ -123,6 +150,31 @@ class ConfigurationStore: ObservableObject {
         serversDirectory.appendingPathComponent("\(id.uuidString).json")
     }
 
+    private func saveServerOrder() {
+        do {
+            let data = try JSONEncoder().encode(configurations.map(\.id))
+            try data.write(to: serverOrderFileURL, options: .atomic)
+        } catch {
+            print("Error saving server order: \(error)")
+        }
+    }
+
+    private func loadServerOrder() -> [UUID] {
+        let legacyURL = appDirectory.appendingPathComponent("server_order.json")
+        let sourceURL = FileManager.default.fileExists(atPath: serverOrderFileURL.path)
+            ? serverOrderFileURL
+            : legacyURL
+        guard let data = try? Data(contentsOf: sourceURL),
+              let order = try? JSONDecoder().decode([UUID].self, from: data) else {
+            return []
+        }
+        if sourceURL == legacyURL {
+            try? data.write(to: serverOrderFileURL, options: .atomic)
+            try? FileManager.default.removeItem(at: legacyURL)
+        }
+        return order
+    }
+
     private func dedicatedDatabaseFileURL(for id: UUID) -> URL {
         databasesDirectory.appendingPathComponent("\(id.uuidString).json")
     }
@@ -140,6 +192,7 @@ class ConfigurationStore: ObservableObject {
                 createdAt: config.createdAt,
                 updatedAt: config.updatedAt,
                 autoStartOnAppLaunch: config.autoStartOnAppLaunch,
+                serverType: config.serverType,
                 webServerType: config.webServerType,
                 webServerPort: config.webServerPort,
                 webServerDocumentRoot: config.webServerDocumentRoot,
@@ -153,6 +206,12 @@ class ConfigurationStore: ObservableObject {
                 phpCPUs: config.phpCPUs,
                 phpMemoryLimit: config.phpMemoryLimit,
                 phpSettings: config.phpSettings,
+                pythonSettings: config.pythonSettings,
+                nodeSettings: config.nodeSettings,
+                npmProxyEnabled: config.npmProxyEnabled,
+                npmProxyHostID: config.npmProxyHostID,
+                npmProxyStatus: config.npmProxyStatus,
+                npmProxyError: config.npmProxyError,
                 databaseConfigRef: config.id
             )
             let serverData = try encoder.encode(serverConfig)
@@ -265,7 +324,20 @@ class ConfigurationStore: ObservableObject {
             }
         }
 
-        return loaded.sorted { $0.createdAt < $1.createdAt }
+        let order = loadServerOrder()
+        let positions = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
+        return loaded.sorted { lhs, rhs in
+            switch (positions[lhs.id], positions[rhs.id]) {
+            case let (left?, right?):
+                return left < right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.createdAt < rhs.createdAt
+            }
+        }
     }
 
     private func loadDatabaseConfiguration(for id: UUID, from envelope: DatabaseConfigurationsEnvelope) -> DatabaseConfigurationFile? {
@@ -366,7 +438,7 @@ class ConfigurationStore: ObservableObject {
     }
 
     private func removeOrphanedConfigurationFiles() {
-        let expectedNames = Set(configurations.map { "\($0.id.uuidString).json" })
+        let expectedNames = Set(configurations.map { "\($0.id.uuidString).json" } + ["server_order.json"])
         removeOrphanedFiles(in: serversDirectory, expectedNames: expectedNames)
 
         let expectedDedicatedNames = Set(
@@ -518,6 +590,7 @@ private struct ServerConfigurationFile: Codable {
     var createdAt: Date
     var updatedAt: Date
     var autoStartOnAppLaunch: Bool = false
+    var serverType: ServerType?
     var webServerType: WebServerType
     var webServerPort: Int
     var webServerDocumentRoot: String
@@ -531,6 +604,12 @@ private struct ServerConfigurationFile: Codable {
     var phpCPUs: String
     var phpMemoryLimit: String
     var phpSettings: PHPSettings
+    var pythonSettings: PythonServerSettings?
+    var nodeSettings: NodeServerSettings?
+    var npmProxyEnabled: Bool?
+    var npmProxyHostID: Int?
+    var npmProxyStatus: String?
+    var npmProxyError: String?
     var databaseConfigRef: UUID
 
     func toServerConfiguration() -> ServerConfiguration {
@@ -540,6 +619,7 @@ private struct ServerConfigurationFile: Codable {
         config.createdAt = createdAt
         config.updatedAt = updatedAt
         config.autoStartOnAppLaunch = autoStartOnAppLaunch
+        config.serverType = serverType ?? .php
         config.webServerType = webServerType
         config.webServerPort = webServerPort
         config.webServerDocumentRoot = webServerDocumentRoot
@@ -553,6 +633,12 @@ private struct ServerConfigurationFile: Codable {
         config.phpCPUs = phpCPUs
         config.phpMemoryLimit = phpMemoryLimit
         config.phpSettings = phpSettings
+        config.pythonSettings = pythonSettings ?? PythonServerSettings()
+        config.nodeSettings = nodeSettings ?? NodeServerSettings()
+        config.npmProxyEnabled = npmProxyEnabled ?? false
+        config.npmProxyHostID = npmProxyHostID
+        config.npmProxyStatus = npmProxyStatus ?? (config.npmProxyEnabled ? "not_created" : "disabled")
+        config.npmProxyError = npmProxyError ?? ""
         return config
     }
 }

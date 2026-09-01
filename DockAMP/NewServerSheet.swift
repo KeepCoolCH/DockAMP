@@ -6,10 +6,22 @@ struct NewServerSheet: View {
     @StateObject private var phpVersionStore = PHPVersionStore.shared
     
     @State private var serverName = ""
+    @State private var serverType: ServerType = .php
     @State private var webServerType: WebServerType = .nginx
     @State private var phpVersion: String = PHPVersionCatalog.defaultVersion
     @State private var webPort = 8081
     @State private var documentRoot = NSHomeDirectory() + "/Sites"
+    @State private var pythonVersion = "3.13"
+    @State private var pythonFramework: PythonFramework = .generic
+    @State private var pythonContainerPort = 8000
+    @State private var pythonStartCommand = "python app.py"
+    @State private var pythonRequirements = ""
+    @State private var nodeVersion = "22"
+    @State private var nodeFramework: NodeFramework = .generic
+    @State private var nodeContainerPort = 3000
+    @State private var nodeStartCommand = "npm start"
+    @State private var nodeInstallCommand = "npm install"
+    @State private var npmProxyEnabled = true
     @State private var mountRows: [MountRowEntry] = []
     @State private var databaseMode: DatabaseAttachmentMode = .global
     @State private var databaseType: DatabaseType = .mysql
@@ -26,6 +38,9 @@ struct NewServerSheet: View {
     @State private var containerBrowserListing: ContainerDirectoryListing?
     @State private var isLoadingContainerBrowser = false
     @State private var containerBrowserError: String?
+    @State private var isCreating = false
+    @State private var createdConfiguration: ServerConfiguration?
+    @State private var creationError: String?
     
     var body: some View {
         NavigationStack {
@@ -34,8 +49,20 @@ struct NewServerSheet: View {
                     TextField("Name", text: $serverName)
                         .textFieldStyle(.roundedBorder)
                 }
+
+                Section("Server Type") {
+                    Picker("Type", selection: $serverType) {
+                        ForEach(ServerType.allCases, id: \.self) { type in
+                            Text(type.rawValue).tag(type)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Toggle("Automatically manage Proxy Host in NPM", isOn: $npmProxyEnabled)
+                }
                 
-                Section("Web Server") {
+                if serverType == .php {
+                    Section("Web Server") {
                     Picker("Type", selection: $webServerType) {
                         ForEach(WebServerType.allCases, id: \.self) { type in
                             Text(type.rawValue).tag(type)
@@ -52,10 +79,75 @@ struct NewServerSheet: View {
                     }
                 }
                 
-                Section("PHP") {
-                    Picker("Version", selection: $phpVersion) {
-                        ForEach(availablePHPVersions, id: \.self) { version in
-                            Text("PHP \(version)").tag(version)
+                    Section("PHP") {
+                        Picker("Version", selection: $phpVersion) {
+                            ForEach(availablePHPVersions, id: \.self) { version in
+                                Text("PHP \(version)").tag(version)
+                            }
+                        }
+                    }
+                } else if serverType == .python {
+                    Section("Python") {
+                        Picker("Version", selection: $pythonVersion) {
+                            ForEach(["3.13", "3.12", "3.11", "3.10", "3.9"], id: \.self) { version in
+                                Text("Python \(version)").tag(version)
+                            }
+                        }
+                        Picker("Framework", selection: $pythonFramework) {
+                            ForEach(PythonFramework.allCases) { framework in
+                                Text(framework.displayName).tag(framework)
+                            }
+                        }
+                        .onChange(of: pythonFramework) { oldValue, newValue in
+                            applyPythonFrameworkDefaults(from: oldValue, to: newValue)
+                        }
+                        LabeledContent("Internal Port") {
+                            TextField("", value: $pythonContainerPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 100)
+                        }
+                        LabeledContent("Host Port") {
+                            TextField("", value: $webPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 100)
+                        }
+                        LabeledContent("Start Command") {
+                            TextField("python app.py", text: $pythonStartCommand)
+                                .textFieldStyle(.roundedBorder).frame(width: 260)
+                        }
+                        LabeledContent("Requirements") {
+                            TextEditor(text: $pythonRequirements)
+                                .font(.system(.body, design: .monospaced)).frame(width: 260, height: 70)
+                        }
+                    }
+                } else {
+                    Section("Node.js") {
+                        Picker("Version", selection: $nodeVersion) {
+                            ForEach(["24", "22", "20", "18"], id: \.self) { version in
+                                Text("Node.js \(version)").tag(version)
+                            }
+                        }
+                        Picker("Framework", selection: $nodeFramework) {
+                            ForEach(NodeFramework.allCases) { framework in
+                                Text(framework.displayName).tag(framework)
+                            }
+                        }
+                        .onChange(of: nodeFramework) { oldValue, newValue in
+                            applyNodeFrameworkDefaults(from: oldValue, to: newValue)
+                        }
+                        LabeledContent("Internal Port") {
+                            TextField("", value: $nodeContainerPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 100)
+                        }
+                        LabeledContent("Host Port") {
+                            TextField("", value: $webPort, format: .number.grouping(.never))
+                                .textFieldStyle(.roundedBorder).frame(width: 100)
+                        }
+                        LabeledContent("Start Command") {
+                            TextField("npm start", text: $nodeStartCommand)
+                                .textFieldStyle(.roundedBorder).frame(width: 260)
+                        }
+                        LabeledContent("Install Command") {
+                            TextField("npm install", text: $nodeInstallCommand)
+                                .textFieldStyle(.roundedBorder).frame(width: 260)
                         }
                     }
                 }
@@ -106,7 +198,7 @@ struct NewServerSheet: View {
                         }
                     }
 
-                    Text("Additional bind mounts for Web + PHP containers")
+                    Text(serverType == .php ? "Additional bind mounts for Web + PHP containers" : "Additional bind mounts for the app container")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
@@ -209,10 +301,14 @@ struct NewServerSheet: View {
                 }
                 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        createServer()
+                    Button(createdConfiguration == nil ? "Create" : "Retry Start") {
+                        Task { await createAndStartServer() }
                     }
-                    .disabled(serverName.isEmpty || (databaseMode != .none && (databaseName.isEmpty || databaseUsername.isEmpty)))
+                    .disabled(
+                        isCreating
+                            || serverName.isEmpty
+                            || (databaseMode != .none && (databaseName.isEmpty || databaseUsername.isEmpty))
+                    )
                 }
             }
         }
@@ -230,6 +326,14 @@ struct NewServerSheet: View {
         .sheet(isPresented: $showingContainerPathBrowser) {
             containerPathBrowserSheet
         }
+        .alert("Server Could Not Start", isPresented: Binding(
+            get: { creationError != nil },
+            set: { if !$0 { creationError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(creationError ?? "Unknown error")
+        }
     }
 
     private var containerPathBrowserSheet: some View {
@@ -238,7 +342,7 @@ struct NewServerSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Container Path Browser")
                         .font(.title2.bold())
-                    Text("\(webServerType.rawValue) container filesystem")
+                    Text("\(serverType.rawValue) container filesystem")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -338,15 +442,44 @@ struct NewServerSheet: View {
         .frame(minWidth: 620, minHeight: 520)
     }
     
-    private func createServer() {
+    @MainActor
+    private func createAndStartServer() async {
+        guard !isCreating else { return }
+        isCreating = true
+        creationError = nil
+        defer { isCreating = false }
+
+        if let createdConfiguration {
+            do {
+                try await DockerManager.shared.startStack(config: createdConfiguration)
+                dismiss()
+            } catch {
+                creationError = error.localizedDescription
+            }
+            return
+        }
+
         let resolvedWebPort = nextAvailableWebPort(startingAt: webPort)
 
         var config = ServerConfiguration(name: serverName)
+        config.serverType = serverType
         config.webServerType = webServerType
         config.phpVersion = phpVersion
         config.webServerPort = resolvedWebPort
         config.webServerDocumentRoot = documentRoot
         config.additionalContainerMounts = serializeMountRows(mountRows)
+        config.pythonSettings.version = pythonVersion
+        config.pythonSettings.framework = pythonFramework
+        config.pythonSettings.containerPort = pythonContainerPort
+        config.pythonSettings.startCommand = pythonStartCommand
+        config.pythonSettings.requirements = pythonRequirements
+        config.nodeSettings.version = nodeVersion
+        config.nodeSettings.framework = nodeFramework
+        config.nodeSettings.containerPort = nodeContainerPort
+        config.nodeSettings.startCommand = nodeStartCommand
+        config.nodeSettings.installCommand = nodeInstallCommand
+        config.npmProxyEnabled = npmProxyEnabled
+        config.npmProxyStatus = npmProxyEnabled ? "not_created" : "disabled"
         config.databaseAttachmentMode = databaseMode
         if databaseMode == .dedicated {
             config.databaseType = databaseType
@@ -358,14 +491,47 @@ struct NewServerSheet: View {
         config.databaseSettings.password = databasePassword
 
         webPort = resolvedWebPort
-        configStore.addConfiguration(config)
-        dismiss()
+        do {
+            try DockerManager.shared.initializeDefaultProjectFiles(for: config)
+            configStore.addConfiguration(config)
+            createdConfiguration = config
+            try await DockerManager.shared.startStack(config: config)
+            dismiss()
+        } catch {
+            creationError = error.localizedDescription
+        }
     }
     
     private func selectDocumentRoot() {
         selectFolder(message: "Select the document root directory") { url in
             documentRoot = url.path
         }
+    }
+
+    private func applyPythonFrameworkDefaults(from oldValue: PythonFramework, to newValue: PythonFramework) {
+        let knownCommands = Set(PythonFramework.allCases.map(\.startCommand))
+        let knownRequirements = Set(PythonFramework.allCases.map(\.suggestedRequirements) + ["fastapi\nuvicorn"])
+        if pythonStartCommand.isEmpty || knownCommands.contains(pythonStartCommand) || pythonStartCommand == oldValue.startCommand {
+            pythonStartCommand = newValue.startCommand
+        }
+        if pythonRequirements.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || knownRequirements.contains(pythonRequirements)
+            || pythonRequirements == oldValue.suggestedRequirements {
+            pythonRequirements = newValue.suggestedRequirements
+        }
+        pythonContainerPort = newValue.containerPort
+    }
+
+    private func applyNodeFrameworkDefaults(from oldValue: NodeFramework, to newValue: NodeFramework) {
+        let knownCommands = Set(NodeFramework.allCases.map(\.startCommand))
+        let knownInstalls = Set(NodeFramework.allCases.map(\.installCommand))
+        if nodeStartCommand.isEmpty || knownCommands.contains(nodeStartCommand) || nodeStartCommand == oldValue.startCommand {
+            nodeStartCommand = newValue.startCommand
+        }
+        if nodeInstallCommand.isEmpty || knownInstalls.contains(nodeInstallCommand) || nodeInstallCommand == oldValue.installCommand {
+            nodeInstallCommand = newValue.installCommand
+        }
+        nodeContainerPort = newValue.containerPort
     }
 
     private func selectAdditionalMountHostPath(_ id: UUID) {
@@ -401,6 +567,7 @@ struct NewServerSheet: View {
     }
 
     private var defaultContainerRootPath: String {
+        if serverType.isAppServer { return "/app" }
         switch webServerType {
         case .apache:
             return "/usr/local/apache2"
@@ -416,6 +583,7 @@ struct NewServerSheet: View {
 
         do {
             var config = ServerConfiguration(name: serverName.isEmpty ? "new-server" : serverName)
+            config.serverType = serverType
             config.webServerType = webServerType
             config.webServerDocumentRoot = documentRoot
             let listing = try await DockerManager.shared.containerDirectories(for: config, path: path)

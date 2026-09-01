@@ -34,7 +34,7 @@ struct DatabaseConfigView: View {
                     HStack {
                         Text("Port")
                         Spacer()
-                        TextField("Port", value: $sharedDatabaseStore.settings.databasePort, format: .number.grouping(.never))
+                        TextField("", value: $sharedDatabaseStore.settings.databasePort, format: .number.grouping(.never))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 120)
 
@@ -110,7 +110,7 @@ struct DatabaseConfigView: View {
                     HStack {
                         Text("Port")
                         Spacer()
-                        TextField("Port", value: $viewModel.configuration.databasePort, format: .number.grouping(.never))
+                        TextField("", value: $viewModel.configuration.databasePort, format: .number.grouping(.never))
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 120)
 
