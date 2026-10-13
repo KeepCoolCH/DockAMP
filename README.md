@@ -17,6 +17,72 @@ Docker version **1.3** | macOS version **1.3** | developed by **Kevin Tobler** �
 
 ---
 
+## 🔄 Changelog Docker version
+
+The most important features added in the available DockAMP releases. Smaller fixes and internal maintenance changes are intentionally summarized.
+
+### 🆕 Version 1.3.x
+
+### V.1.3.3
+- New automatic backup intervals for every hour and every 3, 6, or 12 hours.
+- Bilingual changelog available directly from the DockAMP sidebar.
+- Improved overlay scrolling with a locked page background and a dedicated scrolling area.
+- Improved mobile layout with stable form zoom, dynamic viewport height, and cleaner separators.
+
+### V.1.3.2
+- Optional PROXY Protocol support for the internal Nginx Proxy Manager with automatic restart when toggled.
+- Configurable real client IP detection for Nginx and Apache with editable trusted networks.
+
+### V.1.3.1
+- Automatic proxy host management in Nginx Proxy Manager using stored credentials.
+- Existing proxy hosts can be adopted while preserving custom NPM configuration and locations.
+- Automatic certificate requests for valid domains and proxy status information in the server overview.
+
+### V.1.3.0
+- Python and Node.js app servers with version selection, framework defaults, dependencies, and custom start commands.
+- App file browser, default apps, additional mounts, permission checks, and database integration for app servers.
+- Python and Node.js support in backups, restore, recovery Compose, and image updates.
+- Servers can be freely reordered in the sidebar.
+
+### Version 1.2.x
+
+### V.1.2.13
+- Faster parallel bulk actions for starting and stopping multiple servers.
+- Dedicated database volume names can be customized.
+
+### V.1.2.12
+- Isolated runtime mounts per server instead of exposing the complete data directory to web and PHP containers.
+- Automatic detection and recreation of containers using the previous mount structure.
+
+### V.1.2.11
+- Two step SQL import with preview, large dump support, and reliable temporary file cleanup.
+- Multiple database selection for global imports and target rewriting for server databases.
+- Detection of incompatible database engines and improved compatibility between MySQL and MariaDB.
+
+### V.1.2.10
+- Database names and credentials can be changed later and synchronized with running containers.
+
+### V.1.2.9
+- Expanded Compose management in Container Center with editing, copying, renaming, and rerunning.
+- Safer detection of protected and unused DockAMP images.
+
+### V.1.2.8
+- New Container Center for status, actions, logs, and importing Docker Compose or Docker run configurations.
+
+### V.1.2.7
+- Automatic cleanup of unused database administration containers and global database services.
+
+### V.1.2.6
+- Database image and data checks with migration while preserving the existing state.
+
+### V.1.2.5
+- Maintenance release with updated version information and update metadata.
+
+### V.1.2.4
+- Recovery Compose export with restoration information for operation without DockAMP.
+
+---
+
 ## 🐳 Docker version
 
 ### 🚀 Main features of the Docker version
