@@ -10,31 +10,56 @@ struct DockAMPApp: App {
     @NSApplicationDelegateAdaptor(DockAMPAppDelegate.self) private var appDelegate
     @StateObject private var dockerManager = DockerManager.shared
     @StateObject private var configStore = ConfigurationStore.shared
+    @State private var deferredRuntimeCheck = false
     
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView()
-                .alert("OrbStack or Docker Desktop not found", isPresented: .constant(!dockerManager.isDockerInstalled)) {
-                    Button("Download OrbStack") {
-                        if let url = URL(string: "https://orbstack.dev/download") {
-                            NSWorkspace.shared.open(url)
+                .sheet(isPresented: Binding(
+                    get: { !dockerManager.isDockerInstalled && !deferredRuntimeCheck },
+                    set: { if !$0 { deferredRuntimeCheck = true } }
+                )) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Docker runtime unavailable")
+                            .font(.headline)
+                        Text("Start macOSDocker, OrbStack or Docker Desktop, or download a runtime.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Menu("Download") {
+                                Button("macOSDocker") {
+                                    if let url = URL(string: "http://kevintobler.ch/files/downloads/macOSDocker.dmg") {
+                                        NSWorkspace.shared.open(url)
+                                    }
+                                }
+                                Button("OrbStack") {
+                                    if let url = URL(string: "https://orbstack.dev/download") {
+                                        NSWorkspace.shared.open(url)
+                                    }
+                                }
+                                Button("Docker Desktop") {
+                                    if let url = URL(string: "https://www.docker.com/products/docker-desktop") {
+                                        NSWorkspace.shared.open(url)
+                                    }
+                                }
+                            }
+                            .fixedSize()
+                            Spacer()
+                            Button("Later", role: .cancel) {
+                                deferredRuntimeCheck = true
+                            }
+                            .keyboardShortcut(.cancelAction)
                         }
                     }
-                    Button("Download Docker Desktop") {
-                        if let url = URL(string: "https://www.docker.com/products/docker-desktop") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    Button("Later") {
-                    }
-                } message: {
-                    Text("DockAMP requires OrbStack or Docker Desktop. Please install OrbStack or Docker Desktop for macOS to continue or start OrbStack/Docker Desktop.")
+                    .padding(20)
+                    .frame(width: 360)
                 }
         }
         .defaultSize(width: 1500, height: 980)
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .commands {
+            AppUpdateCommands()
             CommandGroup(after: .newItem) {
                 Button("New Server...") {
                     DockAMPAppDelegate.shared?.showMainWindowMode()
@@ -79,6 +104,7 @@ final class DockAMPAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppUpdateController.shared.start()
         UserDefaults.standard.set(false, forKey: "NSAutomaticQuoteSubstitutionEnabled")
 
         NSApp.setActivationPolicy(.regular)

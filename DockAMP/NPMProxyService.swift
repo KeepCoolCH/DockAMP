@@ -109,10 +109,12 @@ final class NPMProxyService {
         }
 
         let sslEnabled = certificateID > 0
+        let runtimeURL = try await DockerManager.shared.browserURL(port: config.webServerPort)
+        let runtimeHost = runtimeURL.host ?? "localhost"
         let payload: [String: Any] = [
             "domain_names": [domain],
             "forward_scheme": "http",
-            "forward_host": "host.docker.internal",
+            "forward_host": runtimeHost == "localhost" ? "host.docker.internal" : runtimeHost,
             "forward_port": config.webServerPort,
             "access_list_id": 0,
             "certificate_id": certificateID,
@@ -165,7 +167,7 @@ final class NPMProxyService {
 
     private func request(settings: ProxyManagerSettings, path: String, method: String = "GET", payload: [String: Any]? = nil, token: String? = nil, timeout: TimeInterval = 30) async throws -> Any {
         let relativePath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        guard let base = apiBaseURL(settings: settings), let url = URL(string: relativePath, relativeTo: base) else {
+        guard let base = try await apiBaseURL(settings: settings), let url = URL(string: relativePath, relativeTo: base) else {
             throw NPMProxyError.message("The NPM admin address is invalid.")
         }
         var request = URLRequest(url: url)
@@ -195,8 +197,14 @@ final class NPMProxyService {
         }
     }
 
-    private func apiBaseURL(settings: ProxyManagerSettings) -> URL? {
-        var value = settings.mode == .external ? settings.adminIp.trimmingCharacters(in: .whitespacesAndNewlines) : "localhost"
+    private func apiBaseURL(settings: ProxyManagerSettings) async throws -> URL? {
+        if settings.mode == .internal {
+            let url = try await DockerManager.shared.browserURL(port: settings.adminPort)
+            guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            components.path = "/api/"
+            return components.url
+        }
+        var value = settings.adminIp.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.isEmpty { value = "localhost" }
         if !value.contains("://") { value = "http://" + value }
         guard var components = URLComponents(string: value) else { return nil }

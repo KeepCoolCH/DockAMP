@@ -34,9 +34,7 @@ struct ProxyManagerConfigView: View {
 
                 HStack(spacing: 10) {
                     Button("Open Admin") {
-                        if let url = adminURL {
-                            NSWorkspace.shared.open(url)
-                        }
+                        Task { await openAdmin() }
                     }
 
                     if store.settings.mode == .internal {
@@ -352,11 +350,21 @@ struct ProxyManagerConfigView: View {
         "localhost"
     }
 
-    private var adminURL: URL? {
-        if store.settings.mode == .internal {
-            return URL(string: "http://localhost:\(store.settings.adminPort)")
+    private func openAdmin() async {
+        do {
+            let url: URL?
+            if store.settings.mode == .internal {
+                url = try await dockerManager.browserURL(port: store.settings.adminPort)
+            } else {
+                url = externalAdminURL(from: store.settings.adminIp, fallbackPort: store.settings.adminPort)
+            }
+            if let url {
+                NSWorkspace.shared.open(url)
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            showError = true
         }
-        return externalAdminURL(from: store.settings.adminIp, fallbackPort: store.settings.adminPort)
     }
 
     private func externalAdminURL(from value: String, fallbackPort: Int) -> URL? {

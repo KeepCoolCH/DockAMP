@@ -35,7 +35,7 @@ struct WebServerConfigView: View {
                         .foregroundStyle(.secondary)
                 }
                 
-                Text(verbatim: "The port where the web server is reachable (localhost:\(viewModel.configuration.webServerPort))")
+                Text(verbatim: "Published web server port: \(viewModel.configuration.webServerPort)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

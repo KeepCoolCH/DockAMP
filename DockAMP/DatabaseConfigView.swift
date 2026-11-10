@@ -10,6 +10,7 @@ struct DatabaseConfigView: View {
     @State private var rootPasswordChangeMessage: String?
     @State private var showRootPasswordChangeAlert: Bool = false
     @State private var isLaunchingPhpMyAdmin: Bool = false
+    @State private var connectionHost = ""
     
     var body: some View {
         Form {
@@ -202,7 +203,7 @@ struct DatabaseConfigView: View {
                 Section("Connection Details") {
                 VStack(alignment: .leading, spacing: 8) {
                     Group {
-                        ConnectionInfoRow(label: "Host", value: "host.docker.internal")
+                        ConnectionInfoRow(label: "Host", value: connectionHost)
                         ConnectionInfoRow(label: "Port", value: "\(effectivePort)")
                         ConnectionInfoRow(label: "Database", value: viewModel.configuration.databaseSettings.databaseName)
                         ConnectionInfoRow(label: "Username", value: viewModel.configuration.databaseSettings.username)
@@ -260,6 +261,9 @@ struct DatabaseConfigView: View {
         } message: {
             Text(rootPasswordChangeMessage ?? "Unknown status")
         }
+        .task {
+            connectionHost = (try? await DockerManager.shared.browserURL(port: effectivePort).host) ?? ""
+        }
         .onChange(of: viewModel.configuration.databaseAttachmentMode) { oldValue, newValue in
             guard oldValue != .dedicated, newValue == .dedicated else { return }
             let startPort = suggestedDedicatedDatabaseStartPort(for: viewModel.configuration.databaseType)
@@ -279,12 +283,24 @@ struct DatabaseConfigView: View {
     }
     
     private func openSequelPro() {
+        Task {
+            do {
+                let url = try await DockerManager.shared.browserURL(port: effectivePort)
+                openSequelPro(host: url.host ?? "localhost")
+            } catch {
+                rootPasswordChangeMessage = error.localizedDescription
+                showRootPasswordChangeAlert = true
+            }
+        }
+    }
+
+    private func openSequelPro(host: String) {
         let db = viewModel.configuration.databaseSettings
         let port = effectivePort
 
         guard let mysqlURL = buildDatabaseURL(
             scheme: "mysql",
-            host: "127.0.0.1",
+            host: host,
             username: db.username,
             password: db.password,
             port: port,
@@ -320,15 +336,16 @@ struct DatabaseConfigView: View {
 
         do {
             let db = viewModel.configuration.databaseSettings
+            let runtimeURL = try await DockerManager.shared.browserURL(port: effectivePort)
+            let runtimeHost = runtimeURL.host ?? "localhost"
             let hostPort = try await DockerManager.shared.startPhpMyAdmin(
-                host: "host.docker.internal",
+                host: runtimeHost == "localhost" ? "host.docker.internal" : runtimeHost,
                 port: effectivePort,
                 username: db.username,
                 password: db.password
             )
-            if let url = URL(string: "http://localhost:\(hostPort)") {
-                NSWorkspace.shared.open(url)
-            }
+            let url = try await DockerManager.shared.browserURL(port: hostPort)
+            NSWorkspace.shared.open(url)
         } catch {
             rootPasswordChangeMessage = error.localizedDescription
             showRootPasswordChangeAlert = true

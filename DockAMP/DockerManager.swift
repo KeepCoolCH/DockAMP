@@ -3087,20 +3087,80 @@ class DockerManager: ObservableObject {
     }
     
     // MARK: - Command Execution
+
+    func browserURL(port: Int) async throws -> URL {
+        var host = "localhost"
+        let environment = ProcessInfo.processInfo.environment
+        let endpoint: String
+        if let context = environment["DOCKER_CONTEXT"], !context.isEmpty {
+            endpoint = try await executeCommand("docker", arguments: ["context", "inspect", context, "--format", "{{.Endpoints.docker.Host}}"])
+        } else if let configuredHost = environment["DOCKER_HOST"], !configuredHost.isEmpty {
+            endpoint = configuredHost
+        } else {
+            let configDirectory = environment["DOCKER_CONFIG"] ?? NSHomeDirectory() + "/.docker"
+            let configURL = URL(fileURLWithPath: configDirectory).appendingPathComponent("config.json")
+            let dockerConfig = (try? Data(contentsOf: configURL))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            if let context = dockerConfig?["currentContext"] as? String, !context.isEmpty, context != "default" {
+                endpoint = try await executeCommand("docker", arguments: ["context", "inspect", context, "--format", "{{.Endpoints.docker.Host}}"])
+            } else {
+                let sockets = [
+                    NSHomeDirectory() + "/.macosdocker/docker.sock",
+                    NSHomeDirectory() + "/.orbstack/run/docker.sock",
+                    NSHomeDirectory() + "/.docker/run/docker.sock",
+                    "/var/run/docker.sock"
+                ]
+                endpoint = "unix://" + (sockets.first {
+                    FileManager.default.fileExists(atPath: $0) && FileManager.default.isReadableFile(atPath: $0)
+                } ?? "/var/run/docker.sock")
+            }
+        }
+        let socketPath = NSHomeDirectory() + "/.macosdocker/docker.sock"
+        let selectedEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedSocket = String(selectedEndpoint.dropFirst("unix://".count))
+        if selectedEndpoint.hasPrefix("unix://"),
+           URL(fileURLWithPath: selectedSocket).resolvingSymlinksInPath() == URL(fileURLWithPath: socketPath).resolvingSymlinksInPath() {
+            let output = try await executeCommand("curl", arguments: [
+                "--silent", "--show-error", "--fail", "--max-time", "5",
+                "--unix-socket", NSHomeDirectory() + "/.macosdocker/control.sock",
+                "http://localhost/health"
+            ])
+            let data = Data(output.utf8)
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let interfaces = root?["addresses"] as? [[String: Any]] ?? []
+            let addresses = interfaces.filter { $0["ifname"] as? String == "eth0" }
+                .flatMap { $0["addr_info"] as? [[String: Any]] ?? [] }
+                .filter { $0["scope"] as? String == "global" }
+            guard let address = addresses.first(where: { $0["family"] as? String == "inet" })
+                    ?? addresses.first(where: { $0["family"] as? String == "inet6" }),
+                  let local = address["local"] as? String else {
+                throw DockerError.commandFailed("macOSDocker VM IP address is unavailable.")
+            }
+            host = local
+        }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host.contains(":") ? "[" + host + "]" : host
+        components.port = port
+        guard let url = components.url else { throw DockerError.commandFailed("Invalid browser address.") }
+        return url
+    }
     
     func executeCommand(_ command: String, arguments: [String]) async throws -> String {
         try await Task.detached(priority: .userInitiated) { () throws -> String in
             let process = Process()
 
             let possiblePaths = [
+                "\(NSHomeDirectory())/.macosdocker/bin/docker",
                 "/usr/local/bin/docker",
                 "/opt/homebrew/bin/docker",
                 "/usr/bin/docker",
-                "/Applications/Docker.app/Contents/Resources/bin/docker"
+                "/Applications/Docker.app/Contents/Resources/bin/docker",
+                "/Applications/macOSDocker.app/Contents/Resources/DockerTools/bin/docker"
             ]
 
             if command == "docker" {
-                guard let dockerPath = possiblePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+                guard let dockerPath = possiblePaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
                     throw DockerError.notInstalled
                 }
                 process.executableURL = URL(fileURLWithPath: dockerPath)
@@ -3112,16 +3172,19 @@ class DockerManager: ObservableObject {
 
             var environment = ProcessInfo.processInfo.environment
             let paths = [
+                "\(NSHomeDirectory())/.macosdocker/bin",
                 "/usr/local/bin",
                 "/opt/homebrew/bin",
                 "/usr/bin",
                 "/bin",
                 "/Applications/Docker.app/Contents/Resources/bin",
+                "/Applications/macOSDocker.app/Contents/Resources/DockerTools/bin",
                 environment["PATH"] ?? ""
             ].joined(separator: ":")
             environment["PATH"] = paths
 
             let possibleSockets = [
+                "unix://\(NSHomeDirectory())/.macosdocker/docker.sock",
                 "unix://\(NSHomeDirectory())/.orbstack/run/docker.sock",
                 "unix://\(NSHomeDirectory())/.docker/run/docker.sock",
                 "unix:///var/run/docker.sock"
@@ -3132,10 +3195,18 @@ class DockerManager: ObservableObject {
                 return FileManager.default.fileExists(atPath: socketPath) && FileManager.default.isReadableFile(atPath: socketPath)
             }
 
-            if let foundSocket {
+            let configDirectory = environment["DOCKER_CONFIG"] ?? NSHomeDirectory() + "/.docker"
+            let configURL = URL(fileURLWithPath: configDirectory).appendingPathComponent("config.json")
+            let dockerConfig = (try? Data(contentsOf: configURL))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            let currentContext = dockerConfig?["currentContext"] as? String
+            let hasExplicitHost = !(environment["DOCKER_HOST"] ?? "").isEmpty
+            let hasExplicitContext = !(environment["DOCKER_CONTEXT"] ?? "").isEmpty
+            if !hasExplicitHost && !hasExplicitContext,
+               let currentContext, currentContext != "default", !currentContext.isEmpty {
+                environment["DOCKER_CONTEXT"] = currentContext
+            } else if !hasExplicitHost && !hasExplicitContext, let foundSocket {
                 environment["DOCKER_HOST"] = foundSocket
-            } else if environment["DOCKER_HOST"] == nil {
-                environment["DOCKER_HOST"] = "unix://\(NSHomeDirectory())/.orbstack/run/docker.sock"
             }
 
             process.environment = environment

@@ -6,6 +6,7 @@ struct SystemMaintenanceView: View {
     @StateObject private var dockerManager = DockerManager.shared
     @StateObject private var backupManager = BackupManager.shared
     @StateObject private var composeExportManager = ComposeExportManager.shared
+    @ObservedObject private var appUpdates = AppUpdateController.shared
 
     @State private var managedImages: [ManagedImageInfo] = []
     @State private var selectedImageIDs: Set<String> = []
@@ -59,6 +60,7 @@ struct SystemMaintenanceView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    appUpdateSection
                     backupRestoreSection
                     composeExportSection
                     unusedImagesSection
@@ -82,6 +84,38 @@ struct SystemMaintenanceView: View {
         }
         .task {
             await loadAll()
+        }
+    }
+
+    private var appUpdateSection: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("App Updates", systemImage: "arrow.down.circle")
+                        .font(.headline)
+                    Spacer()
+                    if appUpdates.checking {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Button {
+                        appUpdates.check()
+                    } label: {
+                        Label("Check for Updates", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appUpdates.checking)
+                    if let update = appUpdates.available {
+                        Button {
+                            NSWorkspace.shared.open(update.downloadURL)
+                        } label: {
+                            Label("Download V." + update.version, systemImage: "arrow.down.to.line")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                Toggle("Automatically Check for App Updates", isOn: $appUpdates.automaticChecks)
+            }
+            .padding(4)
         }
     }
 

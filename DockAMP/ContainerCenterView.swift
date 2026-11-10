@@ -187,8 +187,15 @@ struct ContainerCenterView: View {
     }
 
     private func openPort(_ port: ContainerCenterPort) {
-        if let url = URL(string: "http://localhost:\(port.hostPort)") {
-            NSWorkspace.shared.open(url)
+        guard let hostPort = Int(port.hostPort) else { return }
+        Task {
+            do {
+                let url = try await dockerManager.browserURL(port: hostPort)
+                NSWorkspace.shared.open(url)
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
         }
     }
 }

@@ -317,9 +317,14 @@ class ServerViewModel: ObservableObject {
     }
     
     func openInBrowser() {
-        let urlString = "http://localhost:\(configuration.webServerPort)"
-        if let url = URL(string: urlString) {
-            NSWorkspace.shared.open(url)
+        Task {
+            do {
+                let url = try await dockerManager.browserURL(port: configuration.webServerPort)
+                NSWorkspace.shared.open(url)
+            } catch {
+                errorMessage = error.localizedDescription
+                showError = true
+            }
         }
     }
 
