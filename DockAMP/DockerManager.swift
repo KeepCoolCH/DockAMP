@@ -2658,9 +2658,9 @@ class DockerManager: ObservableObject {
         return extensions
     }
 
-    private func phpExtensionBootstrapCommand(settings: PHPSettings, runPHPFPMAtEnd: Bool = true) -> String {
+    private func phpExtensionBootstrapCommand(settings: PHPSettings, useExtensionInstaller: Bool) -> String {
         let extensions = selectedPHPExtensions(from: settings)
-        let peclExtensions = selectedPECLPHPExtensions(from: settings)
+        let peclExtensions = useExtensionInstaller ? [] : selectedPECLPHPExtensions(from: settings)
         let installZipBinaryTools = settings.installZipBinaryTools
         let installLibarchiveTools = settings.installLibarchiveTools
         let installICUFullData = settings.installICUFullData
@@ -2785,7 +2785,11 @@ class DockerManager: ObservableObject {
                 echo " $MISSING " | grep -q " zip " && DEPS="$DEPS libzip-dev zlib1g-dev" || true
                 echo " $MISSING " | grep -q " mbstring " && DEPS="$DEPS libonig-dev" || true
                 echo " $MISSING " | grep -q " soap " && DEPS="$DEPS libxml2-dev" || true
-                echo " $MISSING " | grep -q " xsl " && DEPS="$DEPS libxslt1-dev" || true
+                echo " $MISSING " | grep -q " xsl " && DEPS="$DEPS libxml2-dev libxslt1-dev" || true
+                echo " $MISSING " | grep -Eq " (dom|xml|simplexml) " && DEPS="$DEPS libxml2-dev" || true
+                echo " $MISSING " | grep -Eq " (pdo_sqlite|sqlite3) " && DEPS="$DEPS libsqlite3-dev" || true
+                echo " $MISSING " | grep -q " curl " && DEPS="$DEPS libcurl4-openssl-dev" || true
+                echo " $MISSING " | grep -q " ftp " && DEPS="$DEPS libssl-dev" || true
                 echo " $MISSING " | grep -q " gd " && DEPS="$DEPS libpng-dev libjpeg62-turbo-dev libfreetype6-dev" || true
                 if echo " $MISSING " | grep -q " gd "; then
                     [ "$WANT_GD_WEBP" = "1" ] && DEPS="$DEPS libwebp-dev" || true
@@ -2841,7 +2845,7 @@ class DockerManager: ObservableObject {
             php composer-setup.php --install-dir=/usr/local/bin --filename=composer
             rm -f composer-setup.php
         fi
-        \(runPHPFPMAtEnd ? "php-fpm" : "true")
+        true
         """
     }
 
@@ -2888,8 +2892,15 @@ class DockerManager: ObservableObject {
             return imageTag
         }
 
+        let useExtensionInstaller = usesPHPExtensionInstaller(baseImage: config.phpDockerImage, settings: config.phpSettings)
+        let provisionCommand = phpExtensionBootstrapCommand(settings: config.phpSettings, useExtensionInstaller: useExtensionInstaller)
+        if useExtensionInstaller {
+            try await buildPHPExtensionImage(config: config, imageTag: imageTag, provisionCommand: provisionCommand)
+            await cleanupOldPHPRuntimeImages(keeping: imageTag)
+            return imageTag
+        }
+
         let buildContainerName = "\(config.phpContainerName)_imagebuild"
-        let provisionCommand = phpExtensionBootstrapCommand(settings: config.phpSettings, runPHPFPMAtEnd: false)
 
         do {
             _ = try? await executeCommand("docker", arguments: ["rm", "-f", buildContainerName])
@@ -2909,6 +2920,34 @@ class DockerManager: ObservableObject {
             _ = try? await executeCommand("docker", arguments: ["rm", "-f", buildContainerName])
             throw error
         }
+    }
+
+    private func usesPHPExtensionInstaller(baseImage: String, settings: PHPSettings) -> Bool {
+        let version = baseImage.dropFirst("php:".count).prefix { $0 != "-" }
+        return version.compare("8.6", options: .numeric) != .orderedAscending
+            && !selectedPECLPHPExtensions(from: settings).isEmpty
+    }
+
+    private func buildPHPExtensionImage(config: ServerConfiguration, imageTag: String, provisionCommand: String) async throws {
+        let sources = [
+            "redis": "redis-6.4.0RC1",
+            "imagick": "Imagick/imagick@55ed2e9fda264395636a2e27e51f31673f5566ab",
+            "xdebug": "xdebug/xdebug@3.6.0alpha1"
+        ]
+        let packages = selectedPECLPHPExtensions(from: config.phpSettings).map { sources[$0] ?? $0 }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let bootstrap = try JSONEncoder().encode(["sh", "-c", provisionCommand])
+        let dockerfile = """
+        FROM \(config.phpDockerImage)
+        RUN \(String(decoding: bootstrap, as: UTF8.self))
+        COPY --from=ghcr.io/mlocati/php-extension-installer:2.13.3 /usr/bin/install-php-extensions /tmp/install-php-extensions
+        RUN /tmp/install-php-extensions \(packages.joined(separator: " ")) && rm /tmp/install-php-extensions
+        """
+        try dockerfile.write(to: directory.appendingPathComponent("Dockerfile"), atomically: true, encoding: .utf8)
+        _ = try await executeCommand("docker", arguments: ["build", "-t", imageTag, directory.path])
     }
 
     private func cleanupOldPHPRuntimeImages(keeping imageTag: String) async {
@@ -2963,7 +3002,7 @@ class DockerManager: ObservableObject {
 
     private func phpRuntimeSignature(baseImage: String, settings: PHPSettings) -> String {
         var parts: [String] = []
-        parts.append("builder=v2")
+        parts.append(usesPHPExtensionInstaller(baseImage: baseImage, settings: settings) ? "builder=v3" : "builder=v2")
         parts.append("base=\(baseImage)")
         parts.append("ext=\(selectedPHPExtensions(from: settings).sorted().joined(separator: ","))")
         parts.append("pecl=\(selectedPECLPHPExtensions(from: settings).sorted().joined(separator: ","))")

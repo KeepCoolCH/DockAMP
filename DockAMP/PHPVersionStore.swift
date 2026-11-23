@@ -66,7 +66,7 @@ final class PHPVersionStore: ObservableObject {
 }
 
 enum PHPVersionCatalog {
-    static let fallbackVersions: [String] = ["8.5", "8.4", "8.3", "8.2", "8.1", "8.0", "7.4"]
+    static let fallbackVersions: [String] = ["8.6", "8.5", "8.4", "8.3", "8.2", "8.1", "8.0", "7.4"]
     static let defaultVersion = fallbackVersions[0]
 
     static func extractVersions(from tags: [String]) -> [String] {

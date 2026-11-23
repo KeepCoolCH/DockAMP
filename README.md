@@ -3,7 +3,7 @@
 # 🐳 DockAMP Docker image or separate macOS app
 
 **DockAMP** is a Docker image with a responsive web interface to manage official Apache/Nginx, PHP, Python, Node.js, MySQL/MariaDB/PostgeSQL and proxy containers in Docker - also available as a macOS app.
-Docker version **1.3** | macOS version **1.4 (Build 5)** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
+Docker version **1.3.4** | macOS version **1.5 (Build 6)** | developed by **Kevin Tobler** 🌐 [www.kevintobler.ch](https://www.kevintobler.ch)
 
 ---
 
@@ -11,9 +11,9 @@ Docker version **1.3** | macOS version **1.4 (Build 5)** | developed by **Kevin 
 
 [![Download DockAMP Docker image keepcoolch/dockamp:latest](https://img.shields.io/badge/Download-DockAMP_Docker_image-blue)](https://hub.docker.com/r/keepcoolch/dockamp)
 
-🍎 The macOS version supports macOSDocker, Docker Desktop and OrbStack (macOS 14.6 Sonoma or newer)
+🍎 The macOS version supports Docker Desktop and OrbStack (macOS 14.6 Sonoma or newer)
 
-[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.4)
+[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.5)
 
 ---
 
@@ -22,6 +22,10 @@ Docker version **1.3** | macOS version **1.4 (Build 5)** | developed by **Kevin 
 The most important features added in the available DockAMP releases. Smaller fixes and internal maintenance changes are intentionally summarized.
 
 ### 🆕 Version 1.3.x
+
+### V.1.3.4
+- PHP 8.6 runtime builds support Redis, Imagick, Xdebug, and SSH2. PHP 8.5 and earlier continue to use PECL.
+- PHP 8.6 currently uses a Redis release candidate, an Xdebug alpha, and a pinned Imagick development revision.
 
 ### V.1.3.3
 - New automatic backup intervals for every hour and every 3, 6, or 12 hours.
@@ -92,6 +96,7 @@ The most important features added in the available DockAMP releases. Smaller fix
 - Apache or Nginx for each Web/PHP server
 - Automatic PHP version discovery with legacy PHP versions available
 - Automatic Python and Node.js version discovery
+- Custom PHP runtimes with configurable extensions, including Redis, Imagick, Xdebug, and SSH2 on PHP 8.6
 - Advanced PHP, Apache, and Nginx configuration with structured dropdowns for common values
 - Python app support with FastAPI, Flask, Django, Streamlit, Gradio, and generic Python apps
 - Node.js app support with Express, Fastify, Next.js, Vite, Nuxt, and generic Node.js apps
@@ -315,20 +320,6 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 
 ## 🍎 macOS version
 
-## 🔄 Changelog macOS version
-
-#### V.1.4 (Build 5)
-
-- Added macOSDocker support alongside OrbStack and Docker Desktop, including its CLI launcher for Mac folder sharing.
-- Docker connections respect environment overrides and the selected Docker context, with local socket detection when no explicit selection is configured.
-- Automatically detect the macOSDocker VM IP for server browser links, Proxy Manager administration and API access, Container Center port links, phpMyAdmin, and Sequel Ace.
-- Use the detected VM address as the forwarding target when synchronizing NPM proxy hosts on macOSDocker.
-- Added optional daily app update checks and manual checks through the DockAMP menu and System Maintenance.
-- Update information is loaded and compared against the installed version and build.
-- Available updates open the DMG download in the browser for manual installation.
-- Added a compact runtime availability dialog with downloads for all three supported runtimes and a visible Later action.
-- Updated app version to 1.4 and build number to 5.
-
 ### 🚀 Main features of the macOS version
 
 #### Core
@@ -342,12 +333,9 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Per-server start, stop, restart
 - Global actions: start/restart/stop all servers
 - Server auto-start on app launch
-- New servers start automatically after creation; running servers restart automatically after saving a changed name
 - Right-click server actions: duplicate and delete
 - Automatic next free web-port assignment starting at `8081`
 - Server list shows the configured web port next to web server and PHP version
-- Drag-and-drop server ordering is saved and reused by Live Visitors
-- App version is displayed at the bottom left of the sidebar
 
 #### Database modes
 - No database
@@ -370,8 +358,6 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Automatic creation and updating of per-server NPM Proxy Hosts
 - Existing NPM Proxy Hosts can be loaded, selected, and adopted without replacing certificates, Advanced Config, or Custom Locations
 - Public domains reuse or request Let's Encrypt certificates; local domains remain available over HTTP
-- Internal admin links and NPM API requests automatically use the macOSDocker VM IP when that runtime is selected
-- NPM forwarding targets use the detected VM IP on macOSDocker; existing managed hosts are updated on their next synchronization
 
 #### PHP / Web stack
 - Extensive PHP settings (performance, errors, sessions, OPcache, directives)
@@ -397,8 +383,6 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Automatic backups with manual, daily, weekly, and monthly intervals
 - Recovery Compose Export writes `docker-compose.yml`, per-server YAMLs, global database/proxy YAMLs, README, and manifest files to `~/Documents/DockAMP/compose-export`
 - Recovery Compose Export updates automatically when server, global database, or Proxy Manager settings are saved
-- App update controls in System Maintenance and the DockAMP menu: manual checks, optional daily automatic checks, and a download action when an update is available
-- App downloads open in the browser and are installed manually; automatic checks are disabled until enabled
 
 #### UX and control
 - Menu bar app with server list and status dots
@@ -411,9 +395,7 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 - Container logs for web, PHP, database
 - Container Center for DockAMP-managed and other Docker containers
 - Container Center actions for start, stop, restart, delete, logs, and published-port opening
-- Live Visitors view with active request paths and per-server traffic speed, refreshed every five seconds
-- Visitor logs and network speed load separately; the Refresh button remains visually stable during automatic checks
-- Browser links and database administration actions use the detected macOSDocker VM IP or localhost for OrbStack and Docker Desktop
+- Live Visitors view with active request paths and per-server traffic speed, refreshed every second
 - Quick DB actions:
   - Open in Sequel Pro/Ace
   - Open in phpMyAdmin (starts container automatically)
@@ -447,22 +429,14 @@ You can update DockAMP directly from the dashboard, so there's no need to run ma
 
 ## ⚙️ Requirements
 - macOS 14.6 Sonoma or newer
-- macOSDocker, Docker Desktop or OrbStack
+- Docker Desktop or OrbStack (OrbStack recommended for faster network speed)
 
 ## 🔧 Installation
 
-[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.4)
+[![Download DockAMP app for macOS](https://img.shields.io/badge/Download-DockAMP_macOS_app-blue)](https://github.com/KeepCoolCH/DockAMP/releases/tag/V.1.5)
 
-1. Install and start macOSDocker, Docker Desktop or OrbStack. DockAMP respects `DOCKER_CONTEXT`, `DOCKER_HOST` and the selected Docker context. Without an explicit selection, it detects the available local runtime sockets. For macOSDocker, enable its terminal integration to provide the Docker launcher and automatic Mac folder sharing.
+1. Install Docker Desktop or OrbStack (OrbStack recommended for faster network speed).
 2. Open DockAMP.app
-
-The runtime dialog offers download links for macOSDocker, OrbStack, and Docker Desktop. Choose `Later` to continue without a running runtime.
-
-### App updates
-
-Use `DockAMP -> Check for App Updates...` or `System Maintenance -> App Updates -> Check for Updates` for a manual check. Enable `Automatically Check for App Updates` in either location to check once daily while DockAMP is running. The preference is shared between both locations.
-
-DockAMP compares the version first, then the build for matching versions. Choose `Download` to open the DMG in the browser or `Later` to dismiss the update notice. Install downloaded updates manually.
 
 ## 🧩 Usage
 
@@ -471,7 +445,7 @@ DockAMP compares the version first, then the build for matching versions. Choose
 2. Click `+` (or use `File -> New Server...`)
 3. Configure server name, web server, PHP version, ports, and document root
 4. Choose database mode (`No Database`, `Global Database`, `Dedicated Container`)
-5. Click `Create`; DockAMP saves the server and starts it automatically. If startup fails after saving, use `Retry Start` to try again.
+5. Save/create
 
 ### Start and manage
 - Use `Start`, `Stop`, `Restart` in the server detail header
@@ -479,25 +453,21 @@ DockAMP compares the version first, then the build for matching versions. Choose
 
 ### Database connection
 For DB tools use:
-- Host from macOS: the address shown in the Database tab (`localhost` for OrbStack/Docker Desktop, or the detected VM IP for macOSDocker)
+- Host: `host.docker.internal`
 - Port: shown in the Database tab
 - Database/user/password: from server database settings
 
-Inside containers, service names/network aliases are used automatically by DockAMP runtime config. For connections through published ports, DockAMP uses the macOSDocker VM IP on macOSDocker and `host.docker.internal` on OrbStack/Docker Desktop.
+Inside containers, service names/network aliases are used automatically by DockAMP runtime config.
 
 ## 💾 Persistence
 DockAMP stores configuration JSON files under `~/Documents/DockAMP/`:
 
 - `servers/<server-id>.json` (server settings)
-- `servers/server_order.json` (saved sidebar and Live Visitors order)
-- `runtime/<server-id>/` (generated files such as `nginx-main.conf`, `nginx.conf`, `php.ini`, `php-fpm.conf`, and Python `requirements.txt`; paths remain stable when a server is renamed)
 - `databases/global_database.json` (global DB settings + shared entries)
 - `databases/<server-id>.json` (dedicated DB server entries)
 - Proxy Manager settings in the DockAMP app directory (managed by `ProxyManagerStore`)
 - Custom PHP runtime images are tagged and reused by signature
 - On server removal, related containers/resources are cleaned up (including dedicated DB containers)
-- Runtime directories are removed with their server; orphaned UUID runtime directories are cleaned up on app launch
-- App update preferences and notification history are stored in macOS UserDefaults
 
 ---
 
